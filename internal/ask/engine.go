@@ -69,12 +69,6 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 		}
 		return parsed, nil
 	}
-	if !req.ExecutionEnabled {
-		return blockedWorkflowAskResult("workflow execution is disabled (set execution.enabled=true to allow approved read-only steps)"), nil
-	}
-	if workflow.ApprovalPrompterFromContext(ctx) == nil {
-		return blockedWorkflowAskResult("workflow execution requires interactive approvals (TTY stdin)"), nil
-	}
 
 	progress.UpdatePhase(ctx, "tools")
 	ctx = workflow.WithExecutionPolicy(ctx, workflow.ExecutionPolicy{
@@ -157,7 +151,7 @@ func blockedWorkflowAskResult(reason string) model.AskResult {
 		Inferences:    []string{},
 		Uncertainties: []string{reason},
 		Assumptions:   []string{"Execution remains read-only in TOPS v1."},
-		Notes:         []string{"Enable execution in config and rerun in an interactive terminal to approve each step."},
+		Notes:         []string{"Adjust execution policy if needed and rerun in an interactive terminal when approval is required."},
 	}
 }
 

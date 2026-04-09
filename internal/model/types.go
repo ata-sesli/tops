@@ -16,7 +16,6 @@ type CoreRequest struct {
 	CWD                     string `json:"cwd"`
 	Shell                   string `json:"shell"`
 	OS                      string `json:"os"`
-	ExecutionEnabled        bool   `json:"execution_enabled"`
 	ExecutionReadOnlyPolicy string `json:"execution_read_only_policy,omitempty"`
 	ExecutionWritePolicy    string `json:"execution_write_policy,omitempty"`
 	ExecutionTraceMode      string `json:"execution_trace_mode,omitempty"`

@@ -247,6 +247,32 @@ func TestSetModelConfigThinkPersists(t *testing.T) {
 	}
 }
 
+func TestShowExecutionPolicyOmitsDeprecatedEnabledFlag(t *testing.T) {
+	rt := app.Runtime{
+		Config: config.Config{
+			Execution: config.ExecutionConfig{
+				Enabled: true,
+				Permissions: config.ExecutionPermissionsConfig{
+					ReadOnly: config.ActionPermissionAllow,
+					Write:    config.ActionPermissionRequest,
+				},
+				TraceMode: config.TraceModeRelease,
+			},
+		},
+	}
+
+	out, _, err := showExecutionPolicy(rt)
+	if err != nil {
+		t.Fatalf("show execution policy failed: %v", err)
+	}
+	if strings.Contains(out, "enabled:") {
+		t.Fatalf("expected deprecated enabled flag to be omitted, got %q", out)
+	}
+	if !strings.Contains(out, "read_only: allow") || !strings.Contains(out, "write: request") {
+		t.Fatalf("expected permission details, got %q", out)
+	}
+}
+
 func TestResetModelConfigRemovesProfile(t *testing.T) {
 	modelsPath := t.TempDir() + "/models.json"
 	t.Setenv("TOPS_MODEL_PROFILES", modelsPath)

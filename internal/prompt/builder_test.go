@@ -21,28 +21,59 @@ func TestBuildAskPromptIncludesEvidence(t *testing.T) {
 
 func TestBuildGenPromptSchemaInstruction(t *testing.T) {
 	req := model.CoreRequest{Input: "find .log files"}
-	_, user := NewBuilder().BuildGenPrompt(req)
+	system, user := NewBuilder().BuildGenPrompt(req)
 	for _, key := range []string{"command", "explanation", "intent_struct"} {
 		if !strings.Contains(user, key) {
 			t.Fatalf("expected key %s in prompt", key)
 		}
 	}
+	for _, needle := range []string{"must always be JSON arrays of strings", "Do not narrate", "confidence_notes\":[\""} {
+		if !strings.Contains(user, needle) {
+			t.Fatalf("expected gen prompt to include %q, got: %s", needle, user)
+		}
+	}
+	if !strings.Contains(system, "Do not include self-instruction") {
+		t.Fatalf("expected anti-self-instruction rule in system prompt, got: %s", system)
+	}
 }
 
 func TestBuildAskPlanningPromptIncludesFunctionSchema(t *testing.T) {
 	req := model.CoreRequest{Input: "what OS am I using?"}
-	_, user := NewBuilder().BuildAskPlanningPrompt(req)
+	system, user := NewBuilder().BuildAskPlanningPrompt(req)
 	for _, key := range []string{"function_name", "function_args", "command_name", "args"} {
 		if !strings.Contains(user, key) {
 			t.Fatalf("expected planning prompt to mention %s", key)
 		}
+	}
+	for _, needle := range []string{"Return exactly one JSON object", "Do not narrate why you are about to produce JSON", "\"notes\":[\"Architecture is arm64.\"]"} {
+		if !strings.Contains(user, needle) {
+			t.Fatalf("expected ask planning prompt to include %q, got: %s", needle, user)
+		}
+	}
+	if !strings.Contains(system, "Do not include self-instruction") {
+		t.Fatalf("expected anti-self-instruction rule in system prompt, got: %s", system)
 	}
 }
 
 func TestBuildGenPlanningPromptIncludesIDRule(t *testing.T) {
 	req := model.CoreRequest{Input: "generate command"}
 	_, user := NewBuilder().BuildGenPlanningPrompt(req)
-	if !strings.Contains(user, "id must be string or number") {
-		t.Fatalf("expected id normalization rule in planning prompt, got: %s", user)
+	for _, needle := range []string{"id must be string or number", "assumptions, ambiguities, and confidence_notes must always be JSON arrays of strings", "emit the final JSON immediately"} {
+		if !strings.Contains(user, needle) {
+			t.Fatalf("expected planning prompt to include %q, got: %s", needle, user)
+		}
+	}
+}
+
+func TestBuildHelpPromptIncludesArrayRules(t *testing.T) {
+	req := model.CoreRequest{Input: "ls"}
+	system, user := NewBuilder().BuildHelpPrompt(req, nil)
+	for _, needle := range []string{"important_flags, examples, caveats, assumptions, and notes must always be JSON arrays of strings", "notes as [\"...\"] not \"...\"", "\"notes\":[\"Output depends on the target directory.\"]"} {
+		if !strings.Contains(user, needle) {
+			t.Fatalf("expected help prompt to include %q, got: %s", needle, user)
+		}
+	}
+	if !strings.Contains(system, "Do not include self-instruction") {
+		t.Fatalf("expected anti-self-instruction rule in system prompt, got: %s", system)
 	}
 }

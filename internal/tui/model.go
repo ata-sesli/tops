@@ -780,7 +780,6 @@ func switchModel(ctx context.Context, manager ollama.Manager, rt app.Runtime, co
 func showExecutionPolicy(rt app.Runtime) (string, string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Execution policy\n")
-	fmt.Fprintf(&b, "enabled: %t\n", rt.Config.Execution.Enabled)
 	fmt.Fprintf(&b, "read_only: %s\n", rt.Config.Execution.Permissions.ReadOnly)
 	fmt.Fprintf(&b, "write: %s\n", rt.Config.Execution.Permissions.Write)
 	fmt.Fprintf(&b, "trace_mode: %s", rt.Config.Execution.TraceMode)

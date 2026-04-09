@@ -12,6 +12,12 @@ type Parser struct{}
 
 func New() Parser { return Parser{} }
 
+var (
+	helpListFields = []string{"important_flags", "examples", "caveats", "assumptions", "notes"}
+	genListFields  = []string{"assumptions", "ambiguities", "confidence_notes"}
+	askListFields  = []string{"observations", "inferences", "uncertainties", "assumptions", "notes"}
+)
+
 func (Parser) ParseHelp(raw string, target string) (model.HelpResult, error) {
 	var decoded struct {
 		Summary        string   `json:"summary"`
@@ -22,7 +28,7 @@ func (Parser) ParseHelp(raw string, target string) (model.HelpResult, error) {
 		Assumptions    []string `json:"assumptions"`
 		Notes          []string `json:"notes"`
 	}
-	if err := decodeStructured(raw, &decoded); err != nil {
+	if err := decodeStructured(raw, &decoded, helpListFields...); err != nil {
 		return model.HelpResult{}, err
 	}
 	if strings.TrimSpace(decoded.Summary) == "" {
@@ -49,7 +55,7 @@ func (Parser) ParseGen(raw string) (model.GenResult, error) {
 		Ambiguities     []string               `json:"ambiguities"`
 		ConfidenceNotes []string               `json:"confidence_notes"`
 	}
-	if err := decodeStructured(raw, &decoded); err != nil {
+	if err := decodeStructured(raw, &decoded, genListFields...); err != nil {
 		return model.GenResult{}, err
 	}
 	if strings.TrimSpace(decoded.Command) == "" {
@@ -77,7 +83,7 @@ func (Parser) ParseAsk(raw string) (model.AskResult, error) {
 		Assumptions   []string `json:"assumptions"`
 		Notes         []string `json:"notes"`
 	}
-	if err := decodeStructured(raw, &decoded); err != nil {
+	if err := decodeStructured(raw, &decoded, askListFields...); err != nil {
 		return model.AskResult{}, err
 	}
 	if strings.TrimSpace(decoded.Answer) == "" {
@@ -93,10 +99,16 @@ func (Parser) ParseAsk(raw string) (model.AskResult, error) {
 	}, nil
 }
 
-func decodeStructured(raw string, out any) error {
+func decodeStructured(raw string, out any, listFields ...string) error {
 	jsonBlob, err := extractJSON(raw)
 	if err != nil {
 		return err
+	}
+	if len(listFields) > 0 {
+		jsonBlob, err = normalizeListFields(jsonBlob, listFields)
+		if err != nil {
+			return err
+		}
 	}
 	dec := json.NewDecoder(strings.NewReader(jsonBlob))
 	dec.DisallowUnknownFields()
@@ -104,6 +116,48 @@ func decodeStructured(raw string, out any) error {
 		return fmt.Errorf("invalid model JSON: %w", err)
 	}
 	return nil
+}
+
+func normalizeListFields(jsonBlob string, fields []string) (string, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(jsonBlob), &obj); err != nil {
+		return "", fmt.Errorf("invalid model JSON: %w", err)
+	}
+
+	for _, field := range fields {
+		raw, ok := obj[field]
+		if !ok || isJSONNull(raw) {
+			obj[field] = json.RawMessage("[]")
+			continue
+		}
+
+		var list []string
+		if err := json.Unmarshal(raw, &list); err == nil {
+			continue
+		}
+
+		var single string
+		if err := json.Unmarshal(raw, &single); err == nil {
+			wrapped, err := json.Marshal([]string{single})
+			if err != nil {
+				return "", fmt.Errorf("normalize field %q: %w", field, err)
+			}
+			obj[field] = wrapped
+			continue
+		}
+
+		return "", fmt.Errorf("invalid model JSON: field %q must be an array of strings, a string, or null", field)
+	}
+
+	normalized, err := json.Marshal(obj)
+	if err != nil {
+		return "", fmt.Errorf("normalize model JSON: %w", err)
+	}
+	return string(normalized), nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }
 
 func extractJSON(raw string) (string, error) {

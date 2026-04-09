@@ -69,7 +69,6 @@ func normalizeRequest(mode model.Mode, input string, cfg config.Config) (model.C
 		CWD:                     cwd,
 		Shell:                   shell,
 		OS:                      runtime.GOOS,
-		ExecutionEnabled:        cfg.Execution.Enabled,
 		ExecutionReadOnlyPolicy: string(cfg.Execution.Permissions.ReadOnly),
 		ExecutionWritePolicy:    string(cfg.Execution.Permissions.Write),
 		ExecutionTraceMode:      string(cfg.Execution.TraceMode),

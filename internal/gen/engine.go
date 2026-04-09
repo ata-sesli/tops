@@ -63,12 +63,6 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.GenResult
 		parsed.RiskLabels = e.policy.Classify(parsed.Command)
 		return parsed, nil
 	}
-	if !req.ExecutionEnabled {
-		return blockedWorkflowGenResult("workflow execution is disabled (set execution.enabled=true to allow approved read-only steps)"), nil
-	}
-	if workflow.ApprovalPrompterFromContext(ctx) == nil {
-		return blockedWorkflowGenResult("workflow execution requires interactive approvals (TTY stdin)"), nil
-	}
 
 	progress.UpdatePhase(ctx, "tools")
 	ctx = workflow.WithExecutionPolicy(ctx, workflow.ExecutionPolicy{
@@ -122,7 +116,7 @@ func blockedWorkflowGenResult(reason string) model.GenResult {
 		Ambiguities: []string{reason},
 		RiskLabels:  []string{"high-risk"},
 		ConfidenceNotes: []string{
-			"Enable execution in config and rerun in an interactive terminal to approve each step.",
+			"Adjust execution policy if needed and rerun in an interactive terminal when approval is required.",
 		},
 	}
 }

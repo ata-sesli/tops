@@ -76,7 +76,7 @@ type rawStep struct {
 	CommandName      string          `json:"command_name"`
 	Args             []string        `json:"args"`
 	FunctionName     string          `json:"function_name"`
-	FunctionArgs     map[string]any  `json:"function_args"`
+	FunctionArgs     json.RawMessage `json:"function_args"`
 	ExpectedEvidence string          `json:"expected_evidence"`
 	RiskLabels       []string        `json:"risk_labels"`
 	OutputLineLimit  int             `json:"output_line_limit,omitempty"`
@@ -112,7 +112,11 @@ func (p JSONPlanner) normalizeStep(raw rawStep, i int) (WorkflowStep, error) {
 		if !ok {
 			return WorkflowStep{}, fmt.Errorf("workflow step %s references unknown function %q", step.ID, functionName)
 		}
-		command, argv, expected, outputLineLimit, resolveErr := def.Resolve(raw.FunctionArgs)
+		functionArgs, err := normalizeFunctionArgs(raw.FunctionArgs)
+		if err != nil {
+			return WorkflowStep{}, fmt.Errorf("workflow step %s invalid function_args: %w", step.ID, err)
+		}
+		command, argv, expected, outputLineLimit, resolveErr := def.Resolve(functionArgs)
 		if resolveErr != nil {
 			return WorkflowStep{}, fmt.Errorf("workflow step %s invalid function_args: %w", step.ID, resolveErr)
 		}
@@ -141,6 +145,30 @@ func (p JSONPlanner) normalizeStep(raw rawStep, i int) (WorkflowStep, error) {
 		return WorkflowStep{}, fmt.Errorf("workflow step %s has invalid output_line_limit", step.ID)
 	}
 	return step, nil
+}
+
+func normalizeFunctionArgs(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 || isJSONNull(raw) {
+		return map[string]any{}, nil
+	}
+
+	var asMap map[string]any
+	if err := json.Unmarshal(raw, &asMap); err == nil {
+		if asMap == nil {
+			return map[string]any{}, nil
+		}
+		return asMap, nil
+	}
+
+	var asArray []any
+	if err := json.Unmarshal(raw, &asArray); err == nil {
+		if len(asArray) == 0 {
+			return map[string]any{}, nil
+		}
+		return nil, fmt.Errorf("function_args must be an object; only an empty array may be used as a zero-arg fallback")
+	}
+
+	return nil, fmt.Errorf("function_args must be an object or empty array")
 }
 
 func normalizeStepID(raw json.RawMessage, idx int) (string, error) {
@@ -185,4 +213,8 @@ func extractJSONObject(raw string) (string, error) {
 		return "", fmt.Errorf("model response did not contain valid JSON object")
 	}
 	return trimmed[start : end+1], nil
+}
+
+func isJSONNull(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "null"
 }

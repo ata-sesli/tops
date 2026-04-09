@@ -78,6 +78,76 @@ func TestJSONPlannerWorkflowPlanFunctionStep(t *testing.T) {
 	}
 }
 
+func TestJSONPlannerWorkflowPlanFunctionStepNormalizesEmptyArrayArgs(t *testing.T) {
+	planner := NewJSONPlanner()
+	raw := `{
+		"workflow_plan": {
+			"reason": "Need OS information",
+			"steps": [
+				{"id":"s1","intent":"inspect os","function_name":"get_os_info","function_args":[],"expected_evidence":"os"}
+			]
+		}
+	}`
+
+	decision, err := planner.Decide(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("decide failed: %v", err)
+	}
+	if decision.Plan == nil || len(decision.Plan.Steps) != 1 {
+		t.Fatalf("expected one resolved workflow step, got %+v", decision.Plan)
+	}
+	step := decision.Plan.Steps[0]
+	if step.CommandName != "uname" {
+		t.Fatalf("expected resolved command uname, got %q", step.CommandName)
+	}
+	if strings.Join(step.Args, " ") != "-srm" {
+		t.Fatalf("unexpected resolved args: %#v", step.Args)
+	}
+}
+
+func TestJSONPlannerWorkflowPlanFunctionStepRejectsNonEmptyArrayArgs(t *testing.T) {
+	planner := NewJSONPlanner()
+	raw := `{
+		"workflow_plan": {
+			"reason": "Need OS information",
+			"steps": [
+				{"id":"s1","intent":"inspect os","function_name":"get_os_info","function_args":[1],"expected_evidence":"os"}
+			]
+		}
+	}`
+
+	_, err := planner.Decide(context.Background(), raw)
+	if err == nil {
+		t.Fatal("expected error for non-empty array function_args")
+	}
+	if !strings.Contains(err.Error(), "function_args") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestJSONPlannerWorkflowPlanFunctionStepNormalizesNullArgs(t *testing.T) {
+	planner := NewJSONPlanner()
+	raw := `{
+		"workflow_plan": {
+			"reason": "Need OS information",
+			"steps": [
+				{"id":"s1","intent":"inspect os","function_name":"get_os_info","function_args":null,"expected_evidence":"os"}
+			]
+		}
+	}`
+
+	decision, err := planner.Decide(context.Background(), raw)
+	if err != nil {
+		t.Fatalf("decide failed: %v", err)
+	}
+	if decision.Plan == nil || len(decision.Plan.Steps) != 1 {
+		t.Fatalf("expected one resolved workflow step, got %+v", decision.Plan)
+	}
+	if decision.Plan.Steps[0].CommandName != "uname" {
+		t.Fatalf("expected resolved command uname, got %q", decision.Plan.Steps[0].CommandName)
+	}
+}
+
 func TestJSONPlannerRejectsEmptyStepList(t *testing.T) {
 	planner := NewJSONPlanner()
 	raw := `{"workflow_plan":{"reason":"x","steps":[]}}`
