@@ -63,9 +63,6 @@ func (r *CLIReporter) Start(phase string) {
 	done := r.done
 	r.mu.Unlock()
 
-	if r.mode == TraceModeRelease {
-		return
-	}
 	go r.loop(done)
 }
 
@@ -79,9 +76,7 @@ func (r *CLIReporter) Update(phase string) {
 		r.started = true
 		r.startedAt = time.Now()
 		r.done = make(chan struct{})
-		if r.mode != TraceModeRelease {
-			go r.loop(r.done)
-		}
+		go r.loop(r.done)
 	}
 	r.phase = normalizedPhase(phase)
 }
@@ -104,9 +99,6 @@ func (r *CLIReporter) Finish(err error) {
 	close(done)
 	if hadStream {
 		_, _ = fmt.Fprintln(r.out)
-	}
-	if r.mode == TraceModeRelease {
-		return
 	}
 	elapsed := time.Since(startedAt)
 	status := "done"
@@ -146,7 +138,6 @@ func (r *CLIReporter) loop(done <-chan struct{}) {
 
 func (r *CLIReporter) ThinkingChunk(chunk string) {
 	if r.mode == TraceModeRelease {
-		r.writeReleaseThinking(chunk)
 		return
 	}
 	r.writeStreamChunk("thinking", chunk)
@@ -220,32 +211,12 @@ func (r *CLIReporter) writeWorkflowLine(line string) {
 		r.streamTag = ""
 	}
 	r.streaming = false
+	prefix := "[workflow] "
 	if r.mode == TraceModeRelease {
-		_, _ = fmt.Fprintf(r.out, "%s\n", line)
-		return
+		prefix = ""
 	}
-	_, _ = fmt.Fprintf(r.out, "\r[workflow] %s%s", line, clearToEOL())
+	_, _ = fmt.Fprintf(r.out, "\r%s%s%s", prefix, line, clearToEOL())
 	_, _ = fmt.Fprintln(r.out)
-}
-
-func (r *CLIReporter) writeReleaseThinking(chunk string) {
-	if chunk == "" {
-		return
-	}
-	cleaned := strings.ReplaceAll(chunk, "\r", "")
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if !r.enabled || r.out == nil || !r.started {
-		return
-	}
-	if r.streamTag != "thinking" {
-		if r.streamTag != "" {
-			_, _ = fmt.Fprintln(r.out)
-		}
-		r.streamTag = "thinking"
-	}
-	r.streaming = true
-	_, _ = fmt.Fprint(r.out, cleaned)
 }
 
 func normalizeTraceMode(mode string) TraceMode {

@@ -8,7 +8,7 @@ import (
 )
 
 func TestBuildAskPromptIncludesEvidence(t *testing.T) {
-	req := model.CoreRequest{Input: "why is disk usage high?"}
+	req := model.CoreRequest{Input: "why is disk usage high?", AskResponseProfile: model.DefaultAskResponseProfile()}
 	evidence := []model.ToolEvidence{{Command: "df -h", Stdout: "Filesystem 80%"}}
 	system, user := NewBuilder().BuildAskPrompt(req, evidence)
 	if !strings.Contains(system, "observed local evidence") {
@@ -16,6 +16,9 @@ func TestBuildAskPromptIncludesEvidence(t *testing.T) {
 	}
 	if !strings.Contains(user, "df -h") || !strings.Contains(user, "Filesystem 80%") {
 		t.Fatalf("evidence missing from user prompt: %s", user)
+	}
+	if !strings.Contains(user, "keys: answer, observations, inferences, uncertainties, assumptions, notes") {
+		t.Fatalf("expected full ask keys in prompt, got: %s", user)
 	}
 }
 
@@ -38,7 +41,7 @@ func TestBuildGenPromptSchemaInstruction(t *testing.T) {
 }
 
 func TestBuildAskPlanningPromptIncludesFunctionSchema(t *testing.T) {
-	req := model.CoreRequest{Input: "what OS am I using?"}
+	req := model.CoreRequest{Input: "what OS am I using?", AskResponseProfile: model.DefaultAskResponseProfile()}
 	system, user := NewBuilder().BuildAskPlanningPrompt(req)
 	for _, key := range []string{"function_name", "function_args", "command_name", "args"} {
 		if !strings.Contains(user, key) {
@@ -52,6 +55,29 @@ func TestBuildAskPlanningPromptIncludesFunctionSchema(t *testing.T) {
 	}
 	if !strings.Contains(system, "Do not include self-instruction") {
 		t.Fatalf("expected anti-self-instruction rule in system prompt, got: %s", system)
+	}
+}
+
+func TestBuildAskPromptAnswerOnlyProfile(t *testing.T) {
+	req := model.CoreRequest{
+		Input: "what OS am I using?",
+		AskResponseProfile: model.AskResponseProfile{
+			Observations:  false,
+			Inferences:    false,
+			Uncertainties: false,
+			Assumptions:   false,
+			Notes:         false,
+		},
+	}
+	_, user := NewBuilder().BuildAskPrompt(req, []model.ToolEvidence{{Command: "uname -srm", Stdout: "Darwin 24.5.0 arm64"}})
+	if !strings.Contains(user, "keys: answer") {
+		t.Fatalf("expected answer-only keys, got: %s", user)
+	}
+	if strings.Contains(user, "observations") {
+		t.Fatalf("did not expect optional ask keys in answer-only prompt, got: %s", user)
+	}
+	if !strings.Contains(user, `{"answer":"You are running macOS on arm64."}`) {
+		t.Fatalf("expected answer-only example, got: %s", user)
 	}
 }
 

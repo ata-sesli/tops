@@ -10,6 +10,7 @@ import (
 	"tops/internal/gen"
 	"tops/internal/help"
 	"tops/internal/llm"
+	"tops/internal/model"
 	"tops/internal/modelprofile"
 	"tops/internal/obs"
 	"tops/internal/parser"
@@ -20,10 +21,11 @@ import (
 )
 
 type Runtime struct {
-	Config   config.Config
-	Router   core.Router
-	Renderer render.Renderer
-	Logger   *obs.Logger
+	Config             config.Config
+	AskResponseProfile model.AskResponseProfile
+	Router             core.Router
+	Renderer           render.Renderer
+	Logger             *obs.Logger
 }
 
 func NewRuntime(cfg config.Config) (Runtime, error) {
@@ -42,6 +44,7 @@ func NewRuntime(cfg config.Config) (Runtime, error) {
 	responseParser := parser.New()
 	policyEngine := policy.NewEngine()
 	probeTimeout := time.Duration(cfg.Inspection.TimeoutSeconds) * time.Second
+	askResponseProfile := profile.EffectiveAskResponseProfile()
 
 	helpEngine := help.NewEngine(provider, promptBuilder, responseParser, runner, probeTimeout)
 	genEngine := gen.NewEngine(provider, promptBuilder, responseParser, policyEngine, runner)
@@ -50,9 +53,10 @@ func NewRuntime(cfg config.Config) (Runtime, error) {
 	router := core.NewRouter(helpEngine, genEngine, askEngine)
 
 	return Runtime{
-		Config:   cfg,
-		Router:   router,
-		Renderer: render.New(),
-		Logger:   logger,
+		Config:             cfg,
+		AskResponseProfile: askResponseProfile,
+		Router:             router,
+		Renderer:           render.New(),
+		Logger:             logger,
 	}, nil
 }

@@ -271,6 +271,9 @@ func TestShowExecutionPolicyOmitsDeprecatedEnabledFlag(t *testing.T) {
 	if !strings.Contains(out, "read_only: allow") || !strings.Contains(out, "write: request") {
 		t.Fatalf("expected permission details, got %q", out)
 	}
+	if strings.Contains(out, "trace_mode:") {
+		t.Fatalf("expected trace mode to have a dedicated command, got %q", out)
+	}
 }
 
 func TestResetModelConfigRemovesProfile(t *testing.T) {
@@ -423,5 +426,105 @@ func TestSetExecutionPolicyPersistsAndReloads(t *testing.T) {
 	}
 	if loaded.Execution.Permissions.ReadOnly != config.ActionPermissionDisallow {
 		t.Fatalf("expected persisted read_only disallow, got %s", loaded.Execution.Permissions.ReadOnly)
+	}
+}
+
+func TestSetExecutionTracePersistsAndReloads(t *testing.T) {
+	configPath := t.TempDir() + "/config.json"
+	t.Setenv("TOPS_MODEL_PROFILES", t.TempDir()+"/models.json")
+	cfg := config.Config{
+		Provider: config.ProviderConfig{
+			Type:     config.ProviderLocal,
+			Model:    "llama3.1",
+			Endpoint: "http://localhost:11434",
+		},
+		Shell:      "zsh",
+		Output:     config.OutputConfig{Format: "text"},
+		Inspection: config.InspectionConfig{TimeoutSeconds: 10},
+	}
+	if err := config.SaveAtomic(configPath, cfg); err != nil {
+		t.Fatalf("save config failed: %v", err)
+	}
+	rt, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatalf("new runtime failed: %v", err)
+	}
+
+	out, _, updated, err := setExecutionTrace(rt, configPath, func(path string) (app.Runtime, error) {
+		loaded, err := config.Load(path)
+		if err != nil {
+			return app.Runtime{}, err
+		}
+		return app.NewRuntime(loaded)
+	}, "debug")
+	if err != nil {
+		t.Fatalf("set execution trace failed: %v", err)
+	}
+	if !strings.Contains(out, "trace_mode=debug") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if updated == nil || updated.Config.Execution.TraceMode != config.TraceModeDebug {
+		t.Fatalf("expected updated runtime debug trace, got %+v", updated)
+	}
+
+	loaded, err := config.Load(configPath)
+	if err != nil {
+		t.Fatalf("reload config failed: %v", err)
+	}
+	if loaded.Execution.TraceMode != config.TraceModeDebug {
+		t.Fatalf("expected persisted debug trace, got %s", loaded.Execution.TraceMode)
+	}
+}
+
+func TestSetModelResponseProfilePersistsAndReloads(t *testing.T) {
+	modelsPath := t.TempDir() + "/models.json"
+	t.Setenv("TOPS_MODEL_PROFILES", modelsPath)
+	configPath := t.TempDir() + "/config.json"
+
+	cfg := config.Config{
+		Provider: config.ProviderConfig{
+			Type:     config.ProviderLocal,
+			Model:    "llama3.1",
+			Endpoint: "http://localhost:11434",
+		},
+		Shell:      "zsh",
+		Output:     config.OutputConfig{Format: "text"},
+		Inspection: config.InspectionConfig{TimeoutSeconds: 10},
+	}
+	if err := config.SaveAtomic(configPath, cfg); err != nil {
+		t.Fatalf("seed config failed: %v", err)
+	}
+	rt, err := app.NewRuntime(cfg)
+	if err != nil {
+		t.Fatalf("new runtime failed: %v", err)
+	}
+
+	out, _, updated, err := setModelResponseProfile(rt, configPath, func(path string) (app.Runtime, error) {
+		loaded, err := config.Load(path)
+		if err != nil {
+			return app.Runtime{}, err
+		}
+		return app.NewRuntime(loaded)
+	}, "notes", "off")
+	if err != nil {
+		t.Fatalf("set model response profile failed: %v", err)
+	}
+	if !strings.Contains(out, "notes=off") {
+		t.Fatalf("unexpected output: %q", out)
+	}
+	if updated == nil || updated.AskResponseProfile.Notes {
+		t.Fatalf("expected updated runtime notes disabled, got %+v", updated)
+	}
+
+	profiles, err := modelprofile.Load(modelsPath)
+	if err != nil {
+		t.Fatalf("load model profiles failed: %v", err)
+	}
+	profile, ok := profiles.Get(config.ProviderLocal, "llama3.1")
+	if !ok {
+		t.Fatal("expected model profile to exist")
+	}
+	if profile.AskResponse.Notes == nil || *profile.AskResponse.Notes {
+		t.Fatalf("expected persisted notes off, got %+v", profile.AskResponse)
 	}
 }

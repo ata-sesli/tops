@@ -180,7 +180,7 @@ func (c *Config) ApplyDefaults() error {
 		c.Execution.Permissions.Write = ActionPermissionRequest
 	}
 	if c.Execution.TraceMode == "" {
-		c.Execution.TraceMode = TraceModeDebug
+		c.Execution.TraceMode = TraceModeRelease
 	}
 	return nil
 }

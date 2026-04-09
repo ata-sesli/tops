@@ -35,8 +35,8 @@ func TestConfigApplyDefaults(t *testing.T) {
 	if cfg.Execution.Permissions.Write != ActionPermissionRequest {
 		t.Fatalf("expected default write request, got %s", cfg.Execution.Permissions.Write)
 	}
-	if cfg.Execution.TraceMode != TraceModeDebug {
-		t.Fatalf("expected default trace mode debug, got %s", cfg.Execution.TraceMode)
+	if cfg.Execution.TraceMode != TraceModeRelease {
+		t.Fatalf("expected default trace mode release, got %s", cfg.Execution.TraceMode)
 	}
 }
 

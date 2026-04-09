@@ -46,6 +46,7 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 	if question == "" {
 		return model.AskResult{}, fmt.Errorf("ask input is required")
 	}
+	profile := req.AskResponseProfile
 	progress.UpdatePhase(ctx, "planning")
 	systemPrompt, userPrompt := e.prompts.BuildAskPlanningPrompt(req)
 	progress.UpdatePhase(ctx, "provider")
@@ -53,7 +54,7 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Temperature:  0.1,
-		MaxTokens:    900,
+		MaxTokens:    280,
 	})
 	if err != nil {
 		return model.AskResult{}, err
@@ -67,7 +68,7 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 		if err != nil {
 			return model.AskResult{}, err
 		}
-		return parsed, nil
+		return cleanupAskResult(parsed, profile), nil
 	}
 
 	progress.UpdatePhase(ctx, "tools")
@@ -78,12 +79,12 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 	runResult, runErr := e.executor.Execute(ctx, string(req.Mode), req.Input, *decision.Plan)
 	if runErr != nil {
 		if runResult.Status == workflow.RunStatusDenied || runResult.Status == workflow.RunStatusBlocked {
-			return blockedWorkflowAskResult(runResult.ErrorText), nil
+			return cleanupAskResult(blockedWorkflowAskResult(runResult.ErrorText), profile), nil
 		}
 		return model.AskResult{}, fmt.Errorf("workflow execution failed: %w", runErr)
 	}
 	if runResult.Status != workflow.RunStatusCompleted {
-		return blockedWorkflowAskResult(runResult.ErrorText), nil
+		return cleanupAskResult(blockedWorkflowAskResult(runResult.ErrorText), profile), nil
 	}
 
 	evidence, provenance := stepResultsToEvidence(runResult.StepRuns)
@@ -93,7 +94,7 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Temperature:  0.1,
-		MaxTokens:    900,
+		MaxTokens:    askSynthesisMaxTokens(profile),
 	})
 	if err != nil {
 		return model.AskResult{}, err
@@ -102,6 +103,7 @@ func (e Engine) Run(ctx context.Context, req model.CoreRequest) (model.AskResult
 	if err != nil {
 		return model.AskResult{}, err
 	}
+	parsed = cleanupAskResult(parsed, profile)
 	parsed.Provenance = provenance
 	return parsed, nil
 }
@@ -188,6 +190,78 @@ func dedupeProbes(items []probe) []probe {
 		}
 		seen[key] = struct{}{}
 		out = append(out, item)
+	}
+	return out
+}
+
+func askSynthesisMaxTokens(profile model.AskResponseProfile) int {
+	count := profile.EnabledOptionalCount()
+	maxTokens := 140 + (70 * count)
+	if maxTokens > 490 {
+		return 490
+	}
+	return maxTokens
+}
+
+func cleanupAskResult(result model.AskResult, profile model.AskResponseProfile) model.AskResult {
+	result.Answer = strings.TrimSpace(result.Answer)
+	result.Observations = dedupeList(result.Observations)
+	result.Inferences = dedupeList(result.Inferences)
+	result.Uncertainties = dedupeList(result.Uncertainties)
+	result.Assumptions = dedupeList(result.Assumptions)
+	result.Notes = dedupeList(result.Notes)
+
+	excludedFromNotes := make(map[string]struct{}, len(result.Observations)+len(result.Inferences)+len(result.Uncertainties))
+	for _, item := range result.Observations {
+		excludedFromNotes[item] = struct{}{}
+	}
+	for _, item := range result.Inferences {
+		excludedFromNotes[item] = struct{}{}
+	}
+	for _, item := range result.Uncertainties {
+		excludedFromNotes[item] = struct{}{}
+	}
+	filteredNotes := make([]string, 0, len(result.Notes))
+	for _, note := range result.Notes {
+		if _, ok := excludedFromNotes[note]; ok {
+			continue
+		}
+		filteredNotes = append(filteredNotes, note)
+	}
+	result.Notes = filteredNotes
+
+	if !profile.Observations {
+		result.Observations = nil
+	}
+	if !profile.Inferences {
+		result.Inferences = nil
+	}
+	if !profile.Uncertainties {
+		result.Uncertainties = nil
+	}
+	if !profile.Assumptions {
+		result.Assumptions = nil
+	}
+	if !profile.Notes {
+		result.Notes = nil
+	}
+
+	return result
+}
+
+func dedupeList(items []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		trimmed := strings.TrimSpace(item)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
 	}
 	return out
 }

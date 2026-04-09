@@ -94,6 +94,23 @@ func TestParseInputModelConfigReset(t *testing.T) {
 	}
 }
 
+func TestParseInputModelResponseShow(t *testing.T) {
+	parsed := ParseInput("/model response show")
+	if parsed.Kind != KindModelResponseShow {
+		t.Fatalf("expected model_response_show kind, got %s", parsed.Kind)
+	}
+}
+
+func TestParseInputModelResponseSet(t *testing.T) {
+	parsed := ParseInput("/model response set notes off")
+	if parsed.Kind != KindModelResponseSet {
+		t.Fatalf("expected model_response_set kind, got %s", parsed.Kind)
+	}
+	if parsed.ConfigField != "notes" || parsed.Payload != "off" {
+		t.Fatalf("unexpected parse result: %+v", parsed)
+	}
+}
+
 func TestParseInputPurgeConfirm(t *testing.T) {
 	parsed := ParseInput("/purge confirm")
 	if parsed.Kind != KindPurge {
@@ -176,6 +193,23 @@ func TestParseInputExecutionPolicySetWrite(t *testing.T) {
 		t.Fatalf("expected execution_policy_set kind, got %s", parsed.Kind)
 	}
 	if parsed.ConfigField != "write" || parsed.Payload != "request" {
+		t.Fatalf("unexpected parse result: %+v", parsed)
+	}
+}
+
+func TestParseInputExecutionTraceShow(t *testing.T) {
+	parsed := ParseInput("/execution trace show")
+	if parsed.Kind != KindExecutionTraceShow {
+		t.Fatalf("expected execution_trace_show kind, got %s", parsed.Kind)
+	}
+}
+
+func TestParseInputExecutionTraceSet(t *testing.T) {
+	parsed := ParseInput("/execution trace set debug")
+	if parsed.Kind != KindExecutionTraceSet {
+		t.Fatalf("expected execution_trace_set kind, got %s", parsed.Kind)
+	}
+	if parsed.Payload != "debug" {
 		t.Fatalf("unexpected parse result: %+v", parsed)
 	}
 }

@@ -33,7 +33,7 @@ func TestRouterDispatchHelp(t *testing.T) {
 	h := &helpStub{}
 	r := NewRouter(h, genStub{}, askStub{})
 	cfg := config.Config{Shell: "zsh"}
-	out, err := r.Dispatch(context.Background(), model.ModeHelp, "  grep  ", cfg)
+	out, err := r.Dispatch(context.Background(), model.ModeHelp, "  grep  ", cfg, model.DefaultAskResponseProfile())
 	if err != nil {
 		t.Fatalf("dispatch failed: %v", err)
 	}
@@ -47,7 +47,7 @@ func TestRouterDispatchHelp(t *testing.T) {
 
 func TestRouterRejectsEmptyInput(t *testing.T) {
 	r := NewRouter(&helpStub{}, genStub{}, askStub{})
-	_, err := r.Dispatch(context.Background(), model.ModeAsk, "   ", config.Config{Shell: "zsh"})
+	_, err := r.Dispatch(context.Background(), model.ModeAsk, "   ", config.Config{Shell: "zsh"}, model.DefaultAskResponseProfile())
 	if err == nil {
 		t.Fatal("expected error")
 	}

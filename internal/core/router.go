@@ -33,8 +33,8 @@ func NewRouter(helpEngine HelpEngine, genEngine GenEngine, askEngine AskEngine) 
 	return Router{helpEngine: helpEngine, genEngine: genEngine, askEngine: askEngine}
 }
 
-func (r Router) Dispatch(ctx context.Context, mode model.Mode, input string, cfg config.Config) (any, error) {
-	request, err := normalizeRequest(mode, input, cfg)
+func (r Router) Dispatch(ctx context.Context, mode model.Mode, input string, cfg config.Config, askProfile model.AskResponseProfile) (any, error) {
+	request, err := normalizeRequest(mode, input, cfg, askProfile)
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +50,7 @@ func (r Router) Dispatch(ctx context.Context, mode model.Mode, input string, cfg
 	}
 }
 
-func normalizeRequest(mode model.Mode, input string, cfg config.Config) (model.CoreRequest, error) {
+func normalizeRequest(mode model.Mode, input string, cfg config.Config, askProfile model.AskResponseProfile) (model.CoreRequest, error) {
 	trimmed := strings.TrimSpace(input)
 	if trimmed == "" {
 		return model.CoreRequest{}, fmt.Errorf("input cannot be empty")
@@ -72,5 +72,6 @@ func normalizeRequest(mode model.Mode, input string, cfg config.Config) (model.C
 		ExecutionReadOnlyPolicy: string(cfg.Execution.Permissions.ReadOnly),
 		ExecutionWritePolicy:    string(cfg.Execution.Permissions.Write),
 		ExecutionTraceMode:      string(cfg.Execution.TraceMode),
+		AskResponseProfile:      askProfile,
 	}, nil
 }

@@ -75,11 +75,14 @@ func TestCLIReporterReleaseModeSuppressesResponseChunks(t *testing.T) {
 	reporter.Finish(nil)
 
 	got := out.String()
-	if !bytes.Contains([]byte(got), []byte("thinking")) {
-		t.Fatalf("expected thinking output, got %q", got)
+	if bytes.Contains([]byte(got), []byte("thinking")) {
+		t.Fatalf("expected thinking output to be suppressed in release mode, got %q", got)
 	}
 	if bytes.Contains([]byte(got), []byte("workflow_plan")) {
 		t.Fatalf("expected response chunk to be suppressed in release mode, got %q", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("provider")) {
+		t.Fatalf("expected release mode progress output, got %q", got)
 	}
 }
 

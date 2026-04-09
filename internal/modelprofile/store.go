@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"tops/internal/config"
+	"tops/internal/model"
 )
 
 const schemaVersion = 1
@@ -21,6 +22,15 @@ type ModelProfile struct {
 	MaxLength    int                 `json:"max_length,omitempty"`
 	SystemPrompt string              `json:"system_prompt,omitempty"`
 	Think        string              `json:"think,omitempty"`
+	AskResponse  AskResponseConfig   `json:"ask_response,omitempty"`
+}
+
+type AskResponseConfig struct {
+	Observations  *bool `json:"observations,omitempty"`
+	Inferences    *bool `json:"inferences,omitempty"`
+	Uncertainties *bool `json:"uncertainties,omitempty"`
+	Assumptions   *bool `json:"assumptions,omitempty"`
+	Notes         *bool `json:"notes,omitempty"`
 }
 
 type ModelProfiles struct {
@@ -198,6 +208,24 @@ func (m *ModelProfiles) ensureDefaults() {
 	if m.Entries == nil {
 		m.Entries = map[string]ModelProfile{}
 	}
+}
+
+func (p ModelProfile) EffectiveAskResponseProfile() model.AskResponseProfile {
+	defaults := model.DefaultAskResponseProfile()
+	return model.AskResponseProfile{
+		Observations:  boolOrDefault(p.AskResponse.Observations, defaults.Observations),
+		Inferences:    boolOrDefault(p.AskResponse.Inferences, defaults.Inferences),
+		Uncertainties: boolOrDefault(p.AskResponse.Uncertainties, defaults.Uncertainties),
+		Assumptions:   boolOrDefault(p.AskResponse.Assumptions, defaults.Assumptions),
+		Notes:         boolOrDefault(p.AskResponse.Notes, defaults.Notes),
+	}
+}
+
+func boolOrDefault(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
 }
 
 func validateProfile(profile ModelProfile) error {

@@ -22,7 +22,7 @@ func ExecuteMode(ctx context.Context, rt Runtime, mode model.Mode, input string,
 	}()
 	reporter.Update("planning")
 
-	result, err := rt.Router.Dispatch(ctx, mode, input, rt.Config)
+	result, err := rt.Router.Dispatch(ctx, mode, input, rt.Config, rt.AskResponseProfile)
 	if err != nil {
 		return "", err
 	}

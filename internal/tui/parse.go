@@ -26,8 +26,12 @@ const (
 	KindModelConfigShow     CommandKind = "model_config_show"
 	KindModelConfigSet      CommandKind = "model_config_set"
 	KindModelConfigReset    CommandKind = "model_config_reset"
+	KindModelResponseShow   CommandKind = "model_response_show"
+	KindModelResponseSet    CommandKind = "model_response_set"
 	KindExecutionPolicyShow CommandKind = "execution_policy_show"
 	KindExecutionPolicySet  CommandKind = "execution_policy_set"
+	KindExecutionTraceShow  CommandKind = "execution_trace_show"
+	KindExecutionTraceSet   CommandKind = "execution_trace_set"
 	KindSetup               CommandKind = "setup"
 	KindClear               CommandKind = "clear"
 	KindExit                CommandKind = "exit"
@@ -209,7 +213,7 @@ func parseModelCommand(raw string, payload string) ParseResult {
 	trimmed := strings.TrimSpace(payload)
 	parts := strings.Fields(trimmed)
 	if len(parts) == 0 {
-		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model use <index|name> OR /model config <show|set|reset>"}
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model use <index|name> OR /model config <show|set|reset> OR /model response <show|set>"}
 	}
 
 	switch strings.ToLower(parts[0]) {
@@ -220,8 +224,10 @@ func parseModelCommand(raw string, payload string) ParseResult {
 		return ParseResult{Raw: raw, Kind: KindModelUse, Payload: strings.TrimSpace(parts[1])}
 	case "config":
 		return parseModelConfig(raw, trimmed)
+	case "response":
+		return parseModelResponse(raw, trimmed)
 	default:
-		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model use <index|name> OR /model config <show|set|reset>"}
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model use <index|name> OR /model config <show|set|reset> OR /model response <show|set>"}
 	}
 }
 
@@ -257,31 +263,73 @@ func parseModelConfig(raw string, payload string) ParseResult {
 	}
 }
 
+func parseModelResponse(raw string, payload string) ParseResult {
+	rest := strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(payload), "response"))
+	if rest == "" {
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model response show OR /model response set <observations|inferences|uncertainties|assumptions|notes> <on|off>"}
+	}
+	if strings.EqualFold(rest, "show") {
+		return ParseResult{Raw: raw, Kind: KindModelResponseShow}
+	}
+	if !strings.HasPrefix(strings.ToLower(rest), "set ") {
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model response show OR /model response set <observations|inferences|uncertainties|assumptions|notes> <on|off>"}
+	}
+	parts := strings.Fields(strings.TrimSpace(rest[len("set "):]))
+	if len(parts) != 2 {
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model response set <observations|inferences|uncertainties|assumptions|notes> <on|off>"}
+	}
+	field := strings.ToLower(strings.TrimSpace(parts[0]))
+	switch field {
+	case "observations", "inferences", "uncertainties", "assumptions", "notes":
+	default:
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model response set <observations|inferences|uncertainties|assumptions|notes> <on|off>"}
+	}
+	value := strings.ToLower(strings.TrimSpace(parts[1]))
+	if value != "on" && value != "off" {
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /model response set <observations|inferences|uncertainties|assumptions|notes> <on|off>"}
+	}
+	return ParseResult{Raw: raw, Kind: KindModelResponseSet, ConfigField: field, Payload: value}
+}
+
 func parseExecutionCommand(raw string, payload string) ParseResult {
 	parts := strings.Fields(strings.TrimSpace(payload))
 	if len(parts) == 0 {
-		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy show OR /execution policy set <read-only|write> <allow|request|disallow>"}
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy <show|set> OR /execution trace <show|set>"}
 	}
-	if !strings.EqualFold(parts[0], "policy") {
-		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy show OR /execution policy set <read-only|write> <allow|request|disallow>"}
-	}
-	if len(parts) == 2 && strings.EqualFold(parts[1], "show") {
-		return ParseResult{Raw: raw, Kind: KindExecutionPolicyShow}
-	}
-	if len(parts) == 4 && strings.EqualFold(parts[1], "set") {
-		target := strings.ToLower(strings.TrimSpace(parts[2]))
-		if target != "read-only" && target != "write" {
-			return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy set <read-only|write> <allow|request|disallow>"}
+	switch strings.ToLower(parts[0]) {
+	case "policy":
+		if len(parts) == 2 && strings.EqualFold(parts[1], "show") {
+			return ParseResult{Raw: raw, Kind: KindExecutionPolicyShow}
 		}
-		value := strings.ToLower(strings.TrimSpace(parts[3]))
-		if value != "allow" && value != "request" && value != "disallow" {
-			return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy set <read-only|write> <allow|request|disallow>"}
+		if len(parts) == 4 && strings.EqualFold(parts[1], "set") {
+			target := strings.ToLower(strings.TrimSpace(parts[2]))
+			if target != "read-only" && target != "write" {
+				return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy set <read-only|write> <allow|request|disallow>"}
+			}
+			value := strings.ToLower(strings.TrimSpace(parts[3]))
+			if value != "allow" && value != "request" && value != "disallow" {
+				return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy set <read-only|write> <allow|request|disallow>"}
+			}
+			return ParseResult{Raw: raw, Kind: KindExecutionPolicySet, ConfigField: target, Payload: value}
 		}
-		return ParseResult{Raw: raw, Kind: KindExecutionPolicySet, ConfigField: target, Payload: value}
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy show OR /execution policy set <read-only|write> <allow|request|disallow>"}
+	case "trace":
+		if len(parts) == 2 && strings.EqualFold(parts[1], "show") {
+			return ParseResult{Raw: raw, Kind: KindExecutionTraceShow}
+		}
+		if len(parts) == 3 && strings.EqualFold(parts[1], "set") {
+			value := strings.ToLower(strings.TrimSpace(parts[2]))
+			if value != "release" && value != "debug" {
+				return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution trace set <release|debug>"}
+			}
+			return ParseResult{Raw: raw, Kind: KindExecutionTraceSet, Payload: value}
+		}
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution trace show OR /execution trace set <release|debug>"}
+	default:
+		return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy <show|set> OR /execution trace <show|set>"}
 	}
-	return ParseResult{Raw: raw, Kind: KindInvalid, Message: "Usage: /execution policy show OR /execution policy set <read-only|write> <allow|request|disallow>"}
 }
 
 func guidanceMessage() string {
-	return "Manager commands: /setup, /models, /model use <index|name>, /model config <show|set|reset>, /execution policy <show|set>, /history, /history db [N], /sessions [N], /session read <id> [N], /session delete <id> confirm, /purge confirm, /clear, /exit"
+	return "Manager commands: /setup, /models, /model use <index|name>, /model config <show|set|reset>, /model response <show|set>, /execution policy <show|set>, /execution trace <show|set>, /history, /history db [N], /sessions [N], /session read <id> [N], /session delete <id> confirm, /purge confirm, /clear, /exit"
 }

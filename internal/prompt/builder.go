@@ -2,6 +2,7 @@ package prompt
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"tops/internal/model"
@@ -35,16 +36,21 @@ func (Builder) BuildGenPlanningPrompt(req model.CoreRequest) (string, string) {
 }
 
 func (Builder) BuildAskPrompt(req model.CoreRequest, evidence []model.ToolEvidence) (string, string) {
+	profile := req.AskResponseProfile
 	system := "You are TOPS ask engine. Answer using observed local evidence first, and clearly separate observations from inference. Return exactly one JSON object and nothing else. Do not include self-instruction, reasoning narration, schema commentary, or prompt restatement."
-	user := fmt.Sprintf("Question: %s\n\nLocal inspection evidence:\n%s\n\nReturn exactly one JSON object with keys: answer, observations, inferences, uncertainties, assumptions, notes.\nRules:\n- observations, inferences, uncertainties, assumptions, and notes must always be JSON arrays of strings.\n- Use [] for empty lists. Never use null, a string, a number, or an object for list fields.\n- If there is one note, return notes as [\"...\"] not \"...\".\n- If enough evidence is available, emit the final JSON immediately.\n- Do not narrate that you are about to output JSON.\nExample:\n{\"answer\":\"You are running macOS on arm64.\",\"observations\":[\"uname reported Darwin 24.5.0 arm64\"],\"inferences\":[\"Darwin indicates macOS.\"],\"uncertainties\":[],\"assumptions\":[],\"notes\":[\"Architecture is arm64.\"]}", req.Input, renderEvidence(evidence))
+	user := fmt.Sprintf("Question: %s\n\nLocal inspection evidence:\n%s\n\nReturn exactly one JSON object with keys: %s.\nRules:\n- Include only the listed keys.\n- %s\n- If enough evidence is available, emit the final JSON immediately.\n- Do not narrate that you are about to output JSON.\nExample:\n%s", req.Input, renderEvidence(evidence), askJSONKeys(profile), askArrayRules(profile), askJSONExample(profile))
 	return system, user
 }
 
 func (Builder) BuildAskPlanningPrompt(req model.CoreRequest) (string, string) {
+	profile := req.AskResponseProfile
 	system := "You are TOPS ask planner. Return exactly one JSON object and nothing else. Do not include self-instruction, reasoning narration, schema commentary, or prompt restatement."
 	user := fmt.Sprintf(
-		"Question: %s\n\nReturn exactly one JSON object that is either:\n1) Final ask JSON with keys: answer, observations, inferences, uncertainties, assumptions, notes.\nOR\n2) Workflow plan JSON with key workflow_plan.\n\nWorkflow plan schema (preferred):\n{\n  \"workflow_plan\": {\n    \"reason\": \"Need local evidence.\",\n    \"steps\": [\n      {\n        \"id\": \"s1\",\n        \"intent\": \"Get operating system information\",\n        \"function_name\": \"get_os_info\",\n        \"function_args\": {},\n        \"expected_evidence\": \"OS name and version\"\n      }\n    ]\n  }\n}\n\nFinal ask example:\n{\"answer\":\"You are running macOS on arm64.\",\"observations\":[\"uname reported Darwin 24.5.0 arm64\"],\"inferences\":[\"Darwin indicates macOS.\"],\"uncertainties\":[],\"assumptions\":[],\"notes\":[\"Architecture is arm64.\"]}\n\nLegacy command-step schema (still accepted):\n{\n  \"id\": \"s1\",\n  \"intent\": \"...\",\n  \"command_name\": \"pwd\",\n  \"args\": [],\n  \"expected_evidence\": \"...\"\n}\n\nRules:\n- id must be string or number.\n- args must be array of strings when using command_name.\n- observations, inferences, uncertainties, assumptions, and notes must always be JSON arrays of strings.\n- Prefer function_name/function_args for workflow steps.\n- Use workflow plans only when local read-only evidence is required.\n- If enough information is available, emit the final JSON immediately.\n- Do not narrate why you are about to produce JSON.",
+		"Question: %s\n\nReturn exactly one JSON object that is either:\n1) Final ask JSON with keys: %s.\nOR\n2) Workflow plan JSON with key workflow_plan.\n\nWorkflow plan schema (preferred):\n{\n  \"workflow_plan\": {\n    \"reason\": \"Need local evidence.\",\n    \"steps\": [\n      {\n        \"id\": \"s1\",\n        \"intent\": \"Get operating system information\",\n        \"function_name\": \"get_os_info\",\n        \"function_args\": {},\n        \"expected_evidence\": \"OS name and version\"\n      }\n    ]\n  }\n}\n\nFinal ask example:\n%s\n\nLegacy command-step schema (still accepted):\n{\n  \"id\": \"s1\",\n  \"intent\": \"...\",\n  \"command_name\": \"pwd\",\n  \"args\": [],\n  \"expected_evidence\": \"...\"\n}\n\nRules:\n- id must be string or number.\n- args must be array of strings when using command_name.\n- Include only the listed final-response keys.\n- %s\n- Prefer function_name/function_args for workflow steps.\n- Use workflow plans only when local read-only evidence is required.\n- If enough information is available, emit the final JSON immediately.\n- Do not narrate why you are about to produce JSON.",
 		req.Input,
+		askJSONKeys(profile),
+		askJSONExample(profile),
+		askArrayRules(profile),
 	)
 	return system, user
 }
@@ -81,4 +87,68 @@ func indent(input, prefix string) string {
 		lines[i] = prefix + lines[i]
 	}
 	return strings.Join(lines, "\n")
+}
+
+func askJSONKeys(profile model.AskResponseProfile) string {
+	keys := []string{"answer"}
+	if profile.Observations {
+		keys = append(keys, "observations")
+	}
+	if profile.Inferences {
+		keys = append(keys, "inferences")
+	}
+	if profile.Uncertainties {
+		keys = append(keys, "uncertainties")
+	}
+	if profile.Assumptions {
+		keys = append(keys, "assumptions")
+	}
+	if profile.Notes {
+		keys = append(keys, "notes")
+	}
+	return strings.Join(keys, ", ")
+}
+
+func askArrayRules(profile model.AskResponseProfile) string {
+	fields := make([]string, 0, 5)
+	if profile.Observations {
+		fields = append(fields, "observations")
+	}
+	if profile.Inferences {
+		fields = append(fields, "inferences")
+	}
+	if profile.Uncertainties {
+		fields = append(fields, "uncertainties")
+	}
+	if profile.Assumptions {
+		fields = append(fields, "assumptions")
+	}
+	if profile.Notes {
+		fields = append(fields, "notes")
+	}
+	if len(fields) == 0 {
+		return "No list fields are enabled."
+	}
+	sort.Strings(fields)
+	return fmt.Sprintf("%s must always be JSON arrays of strings. Use [] for empty lists. Never use null, a string, a number, or an object for those fields.", strings.Join(fields, ", "))
+}
+
+func askJSONExample(profile model.AskResponseProfile) string {
+	parts := []string{`"answer":"You are running macOS on arm64."`}
+	if profile.Observations {
+		parts = append(parts, `"observations":["uname reported Darwin 24.5.0 arm64"]`)
+	}
+	if profile.Inferences {
+		parts = append(parts, `"inferences":["Darwin indicates macOS."]`)
+	}
+	if profile.Uncertainties {
+		parts = append(parts, `"uncertainties":[]`)
+	}
+	if profile.Assumptions {
+		parts = append(parts, `"assumptions":[]`)
+	}
+	if profile.Notes {
+		parts = append(parts, `"notes":["Architecture is arm64."]`)
+	}
+	return "{" + strings.Join(parts, ",") + "}"
 }

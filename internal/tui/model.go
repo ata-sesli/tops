@@ -301,6 +301,35 @@ func (m *sessionModel) processManagerLine(line string) (tea.Model, tea.Cmd) {
 		}
 		m.renderCommandResult(parsed, true, output, "")
 		return m, checkOllamaStatusCmd(m.ctx, m.ollama, m.runtime)
+	case KindModelResponseShow:
+		if m.runtime == nil {
+			output := "configuration error: TOPS runtime is not configured. Use /setup to create or repair configuration."
+			m.renderCommandResult(parsed, false, output, output)
+			return m, nil
+		}
+		output, _, err := showModelResponseProfile(*m.runtime)
+		if err != nil {
+			m.renderCommandResult(parsed, false, err.Error(), err.Error())
+			return m, nil
+		}
+		m.renderCommandResult(parsed, true, output, "")
+		return m, nil
+	case KindModelResponseSet:
+		if m.runtime == nil {
+			output := "configuration error: TOPS runtime is not configured. Use /setup to create or repair configuration."
+			m.renderCommandResult(parsed, false, output, output)
+			return m, nil
+		}
+		output, _, updated, err := setModelResponseProfile(*m.runtime, m.session.configPath, m.session.runtimeLoader, parsed.ConfigField, parsed.Payload)
+		if err != nil {
+			m.renderCommandResult(parsed, false, err.Error(), err.Error())
+			return m, nil
+		}
+		if updated != nil {
+			m.runtime = updated
+		}
+		m.renderCommandResult(parsed, true, output, "")
+		return m, nil
 	case KindExecutionPolicyShow:
 		if m.runtime == nil {
 			output := "configuration error: TOPS runtime is not configured. Use /setup to create or repair configuration."
@@ -321,6 +350,35 @@ func (m *sessionModel) processManagerLine(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		output, _, updated, err := setExecutionPolicy(*m.runtime, m.session.configPath, m.session.runtimeLoader, parsed.ConfigField, parsed.Payload)
+		if err != nil {
+			m.renderCommandResult(parsed, false, err.Error(), err.Error())
+			return m, nil
+		}
+		if updated != nil {
+			m.runtime = updated
+		}
+		m.renderCommandResult(parsed, true, output, "")
+		return m, nil
+	case KindExecutionTraceShow:
+		if m.runtime == nil {
+			output := "configuration error: TOPS runtime is not configured. Use /setup to create or repair configuration."
+			m.renderCommandResult(parsed, false, output, output)
+			return m, nil
+		}
+		output, _, err := showExecutionTrace(*m.runtime)
+		if err != nil {
+			m.renderCommandResult(parsed, false, err.Error(), err.Error())
+			return m, nil
+		}
+		m.renderCommandResult(parsed, true, output, "")
+		return m, nil
+	case KindExecutionTraceSet:
+		if m.runtime == nil {
+			output := "configuration error: TOPS runtime is not configured. Use /setup to create or repair configuration."
+			m.renderCommandResult(parsed, false, output, output)
+			return m, nil
+		}
+		output, _, updated, err := setExecutionTrace(*m.runtime, m.session.configPath, m.session.runtimeLoader, parsed.Payload)
 		if err != nil {
 			m.renderCommandResult(parsed, false, err.Error(), err.Error())
 			return m, nil
@@ -494,7 +552,7 @@ func (m *sessionModel) appendBanner() {
 	lines := []string{
 		"TOPS Manager TUI (v1, non-executing)",
 		"This interface is for model/chat management. Use CLI for /help /gen /ask.",
-		"Commands: /setup, /models, /model use <index|name>, /model config <show|set|reset>, /execution policy <show|set>",
+		"Commands: /setup, /models, /model use <index|name>, /model config <show|set|reset>, /model response <show|set>, /execution policy <show|set>, /execution trace <show|set>",
 		"Chat: /history, /history db [N], /sessions [N], /session read <id> [N], /session delete <id> confirm, /purge confirm, /clear, /exit",
 		"Ollama status is shown live in the header (green=available, red=unavailable).",
 	}
@@ -559,8 +617,8 @@ func (m *sessionModel) applyLayout() {
 func (m sessionModel) renderManagerView() string {
 	header := []string{
 		"TOPS Manager TUI (v1, non-executing)",
-		"Model: /models, /model use <index|name>, /model config <show|set|reset>",
-		"Execution: /execution policy show|set",
+		"Model: /models, /model use <index|name>, /model config <show|set|reset>, /model response show|set",
+		"Execution: /execution policy show|set, /execution trace show|set",
 		"Chats: /history, /history db [N], /sessions [N], /session read <id> [N], /session delete <id> confirm, /purge confirm",
 		fmt.Sprintf("Runtime loaded: %t", m.runtime != nil),
 		m.renderOllamaStatusLine(),
@@ -781,8 +839,7 @@ func showExecutionPolicy(rt app.Runtime) (string, string, error) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Execution policy\n")
 	fmt.Fprintf(&b, "read_only: %s\n", rt.Config.Execution.Permissions.ReadOnly)
-	fmt.Fprintf(&b, "write: %s\n", rt.Config.Execution.Permissions.Write)
-	fmt.Fprintf(&b, "trace_mode: %s", rt.Config.Execution.TraceMode)
+	fmt.Fprintf(&b, "write: %s", rt.Config.Execution.Permissions.Write)
 	return b.String(), "configuration", nil
 }
 
@@ -821,6 +878,36 @@ func setExecutionPolicy(rt app.Runtime, configPath string, loader RuntimeLoader,
 	return fmt.Sprintf("Execution policy updated: %s=%s", target, permission), "configuration", &reloaded, nil
 }
 
+func showExecutionTrace(rt app.Runtime) (string, string, error) {
+	return fmt.Sprintf("Execution trace\ntrace_mode: %s", rt.Config.Execution.TraceMode), "configuration", nil
+}
+
+func setExecutionTrace(rt app.Runtime, configPath string, loader RuntimeLoader, value string) (string, string, *app.Runtime, error) {
+	mode := config.TraceMode(strings.ToLower(strings.TrimSpace(value)))
+	switch mode {
+	case config.TraceModeRelease, config.TraceModeDebug:
+	default:
+		return "", "configuration", nil, fmt.Errorf("configuration error: trace mode must be release|debug")
+	}
+	cfg := rt.Config
+	cfg.Execution.TraceMode = mode
+	if strings.TrimSpace(configPath) == "" {
+		path, err := config.DefaultPath()
+		if err != nil {
+			return "", "configuration", nil, fmt.Errorf("configuration error: resolve config path: %w", err)
+		}
+		configPath = path
+	}
+	if err := config.SaveAtomic(configPath, cfg); err != nil {
+		return "", "configuration", nil, fmt.Errorf("configuration error: failed to save config: %w", err)
+	}
+	reloaded, err := reloadRuntime(cfg, configPath, loader)
+	if err != nil {
+		return "", "provider", nil, err
+	}
+	return fmt.Sprintf("Execution trace updated: trace_mode=%s", mode), "configuration", &reloaded, nil
+}
+
 func showModelConfig(rt app.Runtime) (string, string, error) {
 	if !isOllamaProvider(rt.Config.Provider.Type) {
 		return "", "configuration", fmt.Errorf("configuration error: /model config is only available for ollama/local providers")
@@ -856,6 +943,80 @@ func showModelConfig(rt app.Runtime) (string, string, error) {
 	fmt.Fprintf(&b, "system_prompt: %s\n", systemPromptVal)
 	fmt.Fprintf(&b, "think: %s", thinkVal)
 	return b.String(), "configuration", nil
+}
+
+func showModelResponseProfile(rt app.Runtime) (string, string, error) {
+	if !isOllamaProvider(rt.Config.Provider.Type) {
+		return "", "configuration", fmt.Errorf("configuration error: /model response is only available for ollama/local providers")
+	}
+	profiles, err := modelprofile.Load("")
+	if err != nil {
+		return "", "configuration", fmt.Errorf("configuration error: load model profiles: %w", err)
+	}
+	profile, ok := profiles.Get(rt.Config.Provider.Type, rt.Config.Provider.Model)
+	if !ok {
+		profile = modelprofile.ModelProfile{
+			Provider: rt.Config.Provider.Type,
+			Model:    rt.Config.Provider.Model,
+		}
+	}
+	askProfile := profile.EffectiveAskResponseProfile()
+	var b strings.Builder
+	fmt.Fprintf(&b, "Ask response profile for %s:%s\n", rt.Config.Provider.Type, rt.Config.Provider.Model)
+	fmt.Fprintf(&b, "answer: on (always)\n")
+	fmt.Fprintf(&b, "observations: %s\n", onOff(askProfile.Observations))
+	fmt.Fprintf(&b, "inferences: %s\n", onOff(askProfile.Inferences))
+	fmt.Fprintf(&b, "uncertainties: %s\n", onOff(askProfile.Uncertainties))
+	fmt.Fprintf(&b, "assumptions: %s\n", onOff(askProfile.Assumptions))
+	fmt.Fprintf(&b, "notes: %s\n", onOff(askProfile.Notes))
+	fmt.Fprintf(&b, "\nThese settings reduce ask response size and affect both prompt shape and rendering.")
+	return b.String(), "configuration", nil
+}
+
+func setModelResponseProfile(rt app.Runtime, configPath string, loader RuntimeLoader, field string, value string) (string, string, *app.Runtime, error) {
+	if !isOllamaProvider(rt.Config.Provider.Type) {
+		return "", "configuration", nil, fmt.Errorf("configuration error: /model response is only available for ollama/local providers")
+	}
+	profiles, err := modelprofile.Load("")
+	if err != nil {
+		return "", "configuration", nil, fmt.Errorf("configuration error: load model profiles: %w", err)
+	}
+	profile, ok := profiles.Get(rt.Config.Provider.Type, rt.Config.Provider.Model)
+	if !ok {
+		profile = modelprofile.ModelProfile{
+			Provider: rt.Config.Provider.Type,
+			Model:    rt.Config.Provider.Model,
+		}
+	}
+	enabled, ok := parseOnOff(value)
+	if !ok {
+		return "", "configuration", nil, fmt.Errorf("configuration error: response value must be on|off")
+	}
+	switch field {
+	case "observations":
+		profile.AskResponse.Observations = boolPtr(enabled)
+	case "inferences":
+		profile.AskResponse.Inferences = boolPtr(enabled)
+	case "uncertainties":
+		profile.AskResponse.Uncertainties = boolPtr(enabled)
+	case "assumptions":
+		profile.AskResponse.Assumptions = boolPtr(enabled)
+	case "notes":
+		profile.AskResponse.Notes = boolPtr(enabled)
+	default:
+		return "", "configuration", nil, fmt.Errorf("configuration error: unsupported response field %q", field)
+	}
+	if err := profiles.Upsert(profile); err != nil {
+		return "", "configuration", nil, fmt.Errorf("configuration error: %w", err)
+	}
+	if err := modelprofile.SaveAtomic("", profiles); err != nil {
+		return "", "configuration", nil, fmt.Errorf("configuration error: save model profiles: %w", err)
+	}
+	reloaded, err := reloadRuntime(rt.Config, configPath, loader)
+	if err != nil {
+		return "", "provider", nil, err
+	}
+	return fmt.Sprintf("Model response profile updated for %s:%s (%s=%s).", rt.Config.Provider.Type, rt.Config.Provider.Model, field, onOff(enabled)), "configuration", &reloaded, nil
 }
 
 func setModelConfig(rt app.Runtime, configPath string, loader RuntimeLoader, field string, value string) (string, string, *app.Runtime, error) {
@@ -978,6 +1139,28 @@ func normalizeThinkSetting(raw string) string {
 	default:
 		return ""
 	}
+}
+
+func parseOnOff(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "on", "true":
+		return true, true
+	case "off", "false":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func onOff(value bool) string {
+	if value {
+		return "on"
+	}
+	return "off"
+}
+
+func boolPtr(v bool) *bool {
+	return &v
 }
 
 func resolveModelChoice(choice string, available []string) (string, error) {

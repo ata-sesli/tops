@@ -5,7 +5,12 @@ import (
 	"testing"
 
 	"tops/internal/config"
+	"tops/internal/model"
 )
+
+func boolRef(v bool) *bool {
+	return &v
+}
 
 func TestLoadMissingFileReturnsEmpty(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing-models.json")
@@ -31,6 +36,10 @@ func TestUpsertGetDeleteRoundTrip(t *testing.T) {
 		MaxLength:    1200,
 		SystemPrompt: "be concise",
 		Think:        "off",
+		AskResponse: AskResponseConfig{
+			Observations: boolRef(false),
+			Notes:        boolRef(false),
+		},
 	})
 	if err != nil {
 		t.Fatalf("upsert failed: %v", err)
@@ -52,6 +61,16 @@ func TestUpsertGetDeleteRoundTrip(t *testing.T) {
 	}
 	if got.Think != "off" {
 		t.Fatalf("expected think=off, got %q", got.Think)
+	}
+	effective := got.EffectiveAskResponseProfile()
+	if effective.Observations {
+		t.Fatal("expected observations disabled")
+	}
+	if effective.Notes {
+		t.Fatal("expected notes disabled")
+	}
+	if !effective.Inferences || !effective.Uncertainties || !effective.Assumptions {
+		t.Fatalf("expected unspecified ask fields to default on, got %+v", effective)
 	}
 
 	if !loaded.Delete(config.ProviderOllama, "llama3.1") {
@@ -84,5 +103,15 @@ func TestUpsertRejectsInvalidThink(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected validation error for invalid think value")
+	}
+}
+
+func TestModelProfileDefaultAskResponseProfile(t *testing.T) {
+	profile := ModelProfile{
+		Provider: config.ProviderOllama,
+		Model:    "llama3.1",
+	}
+	if got := profile.EffectiveAskResponseProfile(); got != model.DefaultAskResponseProfile() {
+		t.Fatalf("expected default ask response profile, got %+v", got)
 	}
 }
