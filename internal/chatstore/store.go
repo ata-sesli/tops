@@ -12,8 +12,9 @@ import (
 )
 
 type ChatStore interface {
-	CreateSession(ctx context.Context, startedAt time.Time) (int64, error)
+	CreateSession(ctx context.Context, record SessionRecord) (int64, error)
 	CloseSession(ctx context.Context, sessionID int64, endedAt time.Time) error
+	UpdateSessionTitle(ctx context.Context, sessionID int64, title string) error
 	InsertMessage(ctx context.Context, message MessageRecord) error
 	ListRecentMessages(ctx context.Context, limit int) ([]PersistedMessage, error)
 	ListMessagesBySession(ctx context.Context, sessionID int64, limit int) ([]PersistedMessage, error)
@@ -28,7 +29,10 @@ type ChatStore interface {
 
 type PersistedSession struct {
 	ID        int64
+	Kind      SessionKind
+	Title     string
 	StartedAt time.Time
+	UpdatedAt time.Time
 	EndedAt   *time.Time
 }
 
@@ -36,6 +40,7 @@ type PersistedMessage struct {
 	ID        int64
 	SessionID int64
 	Timestamp time.Time
+	Source    string
 	RawInput  string
 	Kind      string
 	Mode      string
@@ -48,6 +53,7 @@ type PersistedMessage struct {
 type MessageRecord struct {
 	SessionID int64
 	Timestamp time.Time
+	Source    string
 	RawInput  string
 	Kind      string
 	Mode      string
@@ -55,6 +61,20 @@ type MessageRecord struct {
 	Output    string
 	Success   bool
 	ErrorText string
+}
+
+type SessionKind string
+
+const (
+	SessionKindManager SessionKind = "manager"
+	SessionKindChat    SessionKind = "chat"
+)
+
+type SessionRecord struct {
+	Kind      SessionKind
+	Title     string
+	StartedAt time.Time
+	UpdatedAt time.Time
 }
 
 func DefaultPath() (string, error) {

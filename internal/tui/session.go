@@ -105,7 +105,12 @@ func (s *Session) Run(ctx context.Context, in io.Reader, out io.Writer, rt app.R
 	}
 
 	if s.store != nil {
-		sessionID, err := s.store.CreateSession(ctx, s.now())
+		sessionID, err := s.store.CreateSession(ctx, chatstore.SessionRecord{
+			Kind:      chatstore.SessionKindManager,
+			Title:     "Manager",
+			StartedAt: s.now(),
+			UpdatedAt: s.now(),
+		})
 		if err != nil {
 			return fmt.Errorf("initialize chat persistence session: %w", err)
 		}
@@ -161,6 +166,7 @@ func (s *Session) Run(ctx context.Context, in io.Reader, out io.Writer, rt app.R
 			tea.WithContext(ctx),
 			tea.WithInput(in),
 			tea.WithOutput(out),
+			tea.WithAltScreen(),
 			tea.WithoutSignalHandler(),
 		)
 	} else {
@@ -202,6 +208,7 @@ func (s *Session) persist(ctx context.Context, parsed ParseResult, success bool,
 	record := chatstore.MessageRecord{
 		SessionID: s.sessionID,
 		Timestamp: s.now(),
+		Source:    "system",
 		RawInput:  strings.TrimSpace(parsed.Raw),
 		Kind:      string(parsed.Kind),
 		Mode:      string(parsed.Mode),
@@ -215,6 +222,19 @@ func (s *Session) persist(ctx context.Context, parsed ParseResult, success bool,
 			rt.Logger.Printf("failed to persist chat message: %s", err)
 		}
 	}
+}
+
+func (s *Session) createChatSession(ctx context.Context, title string) (int64, error) {
+	if s.store == nil {
+		return 0, fmt.Errorf("chat storage unavailable")
+	}
+	now := s.now()
+	return s.store.CreateSession(ctx, chatstore.SessionRecord{
+		Kind:      chatstore.SessionKindChat,
+		Title:     strings.TrimSpace(title),
+		StartedAt: now,
+		UpdatedAt: now,
+	})
 }
 
 func isTTYReader(in io.Reader) bool {

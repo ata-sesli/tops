@@ -53,8 +53,8 @@ func TestRootStartsTUICreatesDBAndPersistsMessages(t *testing.T) {
 		t.Fatalf("expected TUI root command to run: %v", err)
 	}
 	output := stdout.String()
-	if !strings.Contains(output, "TOPS Manager TUI") {
-		t.Fatalf("expected TUI banner in output, got: %s", output)
+	if !strings.Contains(output, "Config") || !strings.Contains(output, "Chats") {
+		t.Fatalf("expected visible TUI tabs in output, got: %s", output)
 	}
 	if _, err := os.Stat(dbPath); err != nil {
 		t.Fatalf("expected chat db file to exist: %v", err)

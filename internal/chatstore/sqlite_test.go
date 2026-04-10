@@ -17,7 +17,7 @@ func TestSQLiteMigrationIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store 1 failed: %v", err)
 	}
-	sessionID1, err := store1.CreateSession(ctx, time.Now())
+	sessionID1, err := store1.CreateSession(ctx, SessionRecord{StartedAt: time.Now(), UpdatedAt: time.Now(), Kind: SessionKindManager, Title: "Manager"})
 	if err != nil {
 		t.Fatalf("create session 1 failed: %v", err)
 	}
@@ -33,7 +33,7 @@ func TestSQLiteMigrationIsIdempotent(t *testing.T) {
 		t.Fatalf("open store 2 failed: %v", err)
 	}
 	defer store2.Close()
-	sessionID2, err := store2.CreateSession(ctx, time.Now())
+	sessionID2, err := store2.CreateSession(ctx, SessionRecord{StartedAt: time.Now(), UpdatedAt: time.Now(), Kind: SessionKindManager, Title: "Manager"})
 	if err != nil {
 		t.Fatalf("create session 2 failed: %v", err)
 	}
@@ -51,7 +51,12 @@ func TestSQLiteInsertListCloseAndPurge(t *testing.T) {
 	}
 	defer store.Close()
 
-	sessionID, err := store.CreateSession(ctx, time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC))
+	sessionID, err := store.CreateSession(ctx, SessionRecord{
+		Kind:      SessionKindChat,
+		Title:     "New Chat",
+		StartedAt: time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 3, 22, 10, 0, 0, 0, time.UTC),
+	})
 	if err != nil {
 		t.Fatalf("create session failed: %v", err)
 	}
@@ -59,6 +64,7 @@ func TestSQLiteInsertListCloseAndPurge(t *testing.T) {
 	err = store.InsertMessage(ctx, MessageRecord{
 		SessionID: sessionID,
 		Timestamp: time.Date(2026, 3, 22, 10, 1, 0, 0, time.UTC),
+		Source:    "tops_user",
 		RawInput:  "/ask why",
 		Kind:      "mode",
 		Mode:      "ask",
@@ -73,6 +79,7 @@ func TestSQLiteInsertListCloseAndPurge(t *testing.T) {
 	err = store.InsertMessage(ctx, MessageRecord{
 		SessionID: sessionID,
 		Timestamp: time.Date(2026, 3, 22, 10, 2, 0, 0, time.UTC),
+		Source:    "system",
 		RawInput:  "/history",
 		Kind:      "history",
 		Output:    "No history yet.",
@@ -117,6 +124,12 @@ func TestSQLiteInsertListCloseAndPurge(t *testing.T) {
 	}
 	if sessions[0].EndedAt == nil {
 		t.Fatal("expected ended_at to be populated after CloseSession")
+	}
+	if sessions[0].Kind != SessionKindChat {
+		t.Fatalf("expected chat session kind, got %q", sessions[0].Kind)
+	}
+	if sessions[0].Title != "New Chat" {
+		t.Fatalf("expected stored title, got %q", sessions[0].Title)
 	}
 
 	if err := store.DeleteSession(ctx, sessionID); err != nil {

@@ -25,7 +25,7 @@ type fakeStore struct {
 	sessions         []chatstore.PersistedSession
 }
 
-func (f *fakeStore) CreateSession(ctx context.Context, startedAt time.Time) (int64, error) {
+func (f *fakeStore) CreateSession(ctx context.Context, record chatstore.SessionRecord) (int64, error) {
 	f.nextSessionID++
 	f.created = append(f.created, f.nextSessionID)
 	return f.nextSessionID, nil
@@ -33,6 +33,10 @@ func (f *fakeStore) CreateSession(ctx context.Context, startedAt time.Time) (int
 
 func (f *fakeStore) CloseSession(ctx context.Context, sessionID int64, endedAt time.Time) error {
 	f.closed = append(f.closed, sessionID)
+	return nil
+}
+
+func (f *fakeStore) UpdateSessionTitle(ctx context.Context, sessionID int64, title string) error {
 	return nil
 }
 

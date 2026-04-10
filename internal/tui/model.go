@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"tops/internal/app"
+	"tops/internal/chatstore"
 	"tops/internal/config"
 	"tops/internal/modelprofile"
 	"tops/internal/ollama"
@@ -65,7 +66,8 @@ type sessionModel struct {
 	runtime *app.Runtime
 	ollama  ollama.Manager
 
-	mode uiMode
+	mode      uiMode
+	activeTab chatTab
 
 	width  int
 	height int
@@ -74,6 +76,8 @@ type sessionModel struct {
 
 	outputViewport viewport.Model
 	outputContent  string
+	chatViewport   viewport.Model
+	chatOverlayVP  viewport.Model
 
 	setup        SetupWizardState
 	ollamaStatus ollamaStatusState
@@ -81,6 +85,16 @@ type sessionModel struct {
 	pendingPhase string
 	pendingSince time.Time
 	pendingQuit  bool
+
+	events            chan tea.Msg
+	shell             ShellController
+	shellFactory      func() ShellController
+	chatSessions      []chatstore.PersistedSession
+	selectedChatIndex int
+	selectedChatID    int64
+	liveChatID        int64
+	chatOverlayOpen   bool
+	chatState         map[int64]*chatSessionState
 }
 
 func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, ollamaManager ollama.Manager) sessionModel {
@@ -92,6 +106,8 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 	input.Width = 80
 
 	outputVP := viewport.New(1, 1)
+	chatVP := viewport.New(1, 1)
+	overlayVP := viewport.New(1, 1)
 
 	m := sessionModel{
 		ctx:            ctx,
@@ -99,9 +115,15 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 		runtime:        rt,
 		ollama:         ollamaManager,
 		mode:           uiModeManager,
+		activeTab:      tabConfig,
 		input:          input,
 		outputViewport: outputVP,
+		chatViewport:   chatVP,
+		chatOverlayVP:  overlayVP,
 		ollamaStatus:   deriveOllamaStatus(rt, nil, nil),
+		events:         make(chan tea.Msg, 256),
+		shellFactory:   func() ShellController { return NewPTYShellController() },
+		chatState:      map[int64]*chatSessionState{},
 	}
 	m.appendBanner()
 	return m
@@ -111,6 +133,8 @@ func (m sessionModel) Init() tea.Cmd {
 	return tea.Batch(
 		ollamaStatusTickCmd(),
 		checkOllamaStatusCmd(m.ctx, m.ollama, m.runtime),
+		waitForChatEventCmd(m.events),
+		refreshChatSessionsCmd(m.ctx, m.session.store),
 	)
 }
 
@@ -154,6 +178,42 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.configureInputForManager()
 		m.appendOutputBlock("Setup completed. Runtime reloaded.")
 		return m, checkOllamaStatusCmd(m.ctx, m.ollama, m.runtime)
+	case chatSessionsLoadedMsg:
+		m.chatSessions = msg.Sessions
+		m.syncSelectedChat()
+		m.refreshChatOverlay()
+		if m.selectedChatID != 0 {
+			if err := m.loadTranscriptForSelectedChat(); err == nil {
+				m.configureInputForChat()
+			}
+		}
+		if m.activeTab == tabChats {
+			if waitCmd, ok := m.ensureShellForChat(m.currentChatState()); ok && waitCmd != nil {
+				return m, waitCmd
+			}
+		}
+		return m, nil
+	case chatShellOutputMsg:
+		m.handleChatShellOutput(msg)
+		if m.shell != nil && msg.SessionID == m.liveChatID {
+			return m, waitForShellOutputCmd(m.shell, msg.SessionID)
+		}
+		return m, nil
+	case chatProgressMsg:
+		m.handleChatProgress(msg)
+		return m, waitForChatEventCmd(m.events)
+	case chatStreamMsg:
+		m.handleChatStream(msg)
+		return m, waitForChatEventCmd(m.events)
+	case chatWorkflowMsg:
+		m.handleChatWorkflow(msg)
+		return m, waitForChatEventCmd(m.events)
+	case chatApprovalRequestMsg:
+		m.handleChatApprovalRequest(msg)
+		return m, waitForChatEventCmd(m.events)
+	case chatTurnDoneMsg:
+		m.handleChatTurnDone(msg)
+		return m, waitForChatEventCmd(m.events)
 	case managerCommandResultMsg:
 		m.stopPending()
 		if msg.UpdatedRuntime != nil {
@@ -185,6 +245,16 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == uiModeSetup {
 			return m.handleSetupKey(msg)
 		}
+		if msg.Type == tea.KeyShiftTab {
+			m.toggleTab()
+			if m.activeTab == tabChats {
+				return m, refreshChatSessionsCmd(m.ctx, m.session.store)
+			}
+			return m, nil
+		}
+		if m.activeTab == tabChats {
+			return m.handleChatKey(msg)
+		}
 		return m.handleManagerKey(msg)
 	}
 	return m, nil
@@ -193,6 +263,9 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m sessionModel) View() string {
 	if m.mode == uiModeSetup {
 		return m.renderSetupView()
+	}
+	if m.activeTab == tabChats {
+		return m.renderChatView()
 	}
 	return m.renderManagerView()
 }
@@ -440,7 +513,12 @@ func (m *sessionModel) processManagerLine(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if parsed.SessionID == m.session.sessionID {
-			newSessionID, err := m.session.store.CreateSession(m.ctx, m.session.now())
+			newSessionID, err := m.session.store.CreateSession(m.ctx, chatstore.SessionRecord{
+				Kind:      chatstore.SessionKindManager,
+				Title:     "Manager",
+				StartedAt: m.session.now(),
+				UpdatedAt: m.session.now(),
+			})
 			if err != nil {
 				output := fmt.Sprintf("Failed to rotate active session before delete: %s", err)
 				m.renderCommandResult(parsed, false, output, output)
@@ -467,7 +545,12 @@ func (m *sessionModel) processManagerLine(line string) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.session.history = nil
-		newSessionID, err := m.session.store.CreateSession(m.ctx, m.session.now())
+		newSessionID, err := m.session.store.CreateSession(m.ctx, chatstore.SessionRecord{
+			Kind:      chatstore.SessionKindManager,
+			Title:     "Manager",
+			StartedAt: m.session.now(),
+			UpdatedAt: m.session.now(),
+		})
 		if err != nil {
 			output := fmt.Sprintf("Purged history but failed to create a new persistence session: %s", err)
 			m.renderCommandResult(parsed, false, output, output)
@@ -611,19 +694,21 @@ func (m *sessionModel) applyLayout() {
 	}
 	m.outputViewport.Width = max(1, m.width-2)
 	m.outputViewport.Height = max(1, viewHeight-2)
+	m.chatViewport.Width = max(20, m.width-2)
+	m.chatViewport.Height = max(1, viewHeight)
+	m.chatOverlayVP.Width = max(28, min(64, m.width-12))
+	m.chatOverlayVP.Height = max(8, min(18, viewHeight-4))
 	m.input.Width = max(20, m.width-12)
+	if m.shell != nil {
+		_ = m.shell.Resize(m.chatViewport.Width, m.chatViewport.Height)
+	}
 }
 
 func (m sessionModel) renderManagerView() string {
 	header := []string{
-		"TOPS Manager TUI (v1, non-executing)",
-		"Model: /models, /model use <index|name>, /model config <show|set|reset>, /model response show|set",
-		"Execution: /execution policy show|set, /execution trace show|set",
-		"Chats: /history, /history db [N], /sessions [N], /session read <id> [N], /session delete <id> confirm, /purge confirm",
-		fmt.Sprintf("Runtime loaded: %t", m.runtime != nil),
-		m.renderOllamaStatusLine(),
-		m.renderPendingLine(),
-		"Use CLI for engine commands: tops help|gen|ask ...",
+		renderTabs(m.activeTab),
+		fmt.Sprintf("Config    Runtime: %t    %s    %s", m.runtime != nil, m.renderOllamaStatusLine(), m.renderPendingLine()),
+		"Shift+Tab switches tabs  /setup configures TOPS  /models manages Ollama  /history shows records  /exit quits",
 	}
 	headerText := strings.Join(header, "\n")
 
@@ -1256,6 +1341,13 @@ func deriveOllamaStatus(rt *app.Runtime, models []string, err error) ollamaStatu
 
 func max(a int, b int) int {
 	if a > b {
+		return a
+	}
+	return b
+}
+
+func min(a int, b int) int {
+	if a < b {
 		return a
 	}
 	return b

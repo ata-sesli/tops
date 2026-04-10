@@ -17,7 +17,7 @@ import (
 	"tops/internal/workflow"
 )
 
-const schemaVersion = 2
+const schemaVersion = 3
 
 type SQLiteStore struct {
 	db     *sql.DB
@@ -119,6 +119,22 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 				`CREATE INDEX IF NOT EXISTS idx_workflow_runs_started_at ON workflow_runs(started_at)`,
 				`CREATE INDEX IF NOT EXISTS idx_workflow_steps_run_id_step_index ON workflow_steps(run_id, step_index)`,
 			}
+		case 3:
+			statements = []string{
+				`ALTER TABLE chat_sessions ADD COLUMN kind TEXT NOT NULL DEFAULT 'manager'`,
+				`ALTER TABLE chat_sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+				`ALTER TABLE chat_sessions ADD COLUMN updated_at TEXT`,
+				`ALTER TABLE chat_messages ADD COLUMN source TEXT NOT NULL DEFAULT 'system'`,
+				`UPDATE chat_sessions
+					SET title = CASE
+						WHEN title = '' THEN 'Session ' || id
+						ELSE title
+					END`,
+				`UPDATE chat_sessions
+					SET updated_at = COALESCE(updated_at, ended_at, started_at)`,
+				`CREATE INDEX IF NOT EXISTS idx_chat_sessions_kind_updated_at ON chat_sessions(kind, updated_at DESC, id DESC)`,
+				`CREATE INDEX IF NOT EXISTS idx_chat_messages_session_id_timestamp ON chat_messages(session_id, timestamp)`,
+			}
 		default:
 			return fmt.Errorf("unsupported migration target version %d", next)
 		}
@@ -138,8 +154,34 @@ func (s *SQLiteStore) migrate(ctx context.Context) error {
 	return nil
 }
 
-func (s *SQLiteStore) CreateSession(ctx context.Context, startedAt time.Time) (int64, error) {
-	result, err := s.db.ExecContext(ctx, `INSERT INTO chat_sessions(started_at) VALUES (?)`, startedAt.UTC().Format(time.RFC3339Nano))
+func (s *SQLiteStore) CreateSession(ctx context.Context, record SessionRecord) (int64, error) {
+	startedAt := record.StartedAt
+	if startedAt.IsZero() {
+		startedAt = time.Now()
+	}
+	updatedAt := record.UpdatedAt
+	if updatedAt.IsZero() {
+		updatedAt = startedAt
+	}
+	kind := strings.TrimSpace(string(record.Kind))
+	if kind == "" {
+		kind = string(SessionKindManager)
+	}
+	title := strings.TrimSpace(record.Title)
+	if title == "" {
+		switch SessionKind(kind) {
+		case SessionKindChat:
+			title = "New Chat"
+		default:
+			title = "Manager"
+		}
+	}
+	result, err := s.db.ExecContext(ctx, `INSERT INTO chat_sessions(started_at, kind, title, updated_at) VALUES (?, ?, ?, ?)`,
+		startedAt.UTC().Format(time.RFC3339Nano),
+		kind,
+		title,
+		updatedAt.UTC().Format(time.RFC3339Nano),
+	)
 	if err != nil {
 		return 0, fmt.Errorf("create chat session: %w", err)
 	}
@@ -151,9 +193,28 @@ func (s *SQLiteStore) CreateSession(ctx context.Context, startedAt time.Time) (i
 }
 
 func (s *SQLiteStore) CloseSession(ctx context.Context, sessionID int64, endedAt time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET ended_at = ? WHERE id = ?`, endedAt.UTC().Format(time.RFC3339Nano), sessionID)
+	_, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET ended_at = ?, updated_at = ? WHERE id = ?`, endedAt.UTC().Format(time.RFC3339Nano), endedAt.UTC().Format(time.RFC3339Nano), sessionID)
 	if err != nil {
 		return fmt.Errorf("close chat session %d: %w", sessionID, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) UpdateSessionTitle(ctx context.Context, sessionID int64, title string) error {
+	if sessionID <= 0 {
+		return fmt.Errorf("update chat session title: session id must be > 0")
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return fmt.Errorf("update chat session title: title cannot be empty")
+	}
+	_, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET title = ?, updated_at = ? WHERE id = ?`,
+		title,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		sessionID,
+	)
+	if err != nil {
+		return fmt.Errorf("update chat session title %d: %w", sessionID, err)
 	}
 	return nil
 }
@@ -163,11 +224,19 @@ func (s *SQLiteStore) InsertMessage(ctx context.Context, message MessageRecord) 
 	if message.Success {
 		success = 1
 	}
+	if message.Timestamp.IsZero() {
+		message.Timestamp = time.Now()
+	}
+	source := strings.TrimSpace(message.Source)
+	if source == "" {
+		source = "system"
+	}
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO chat_messages(session_id, timestamp, raw_input, kind, mode, payload, output, success, error_text)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO chat_messages(session_id, timestamp, source, raw_input, kind, mode, payload, output, success, error_text)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		message.SessionID,
 		message.Timestamp.UTC().Format(time.RFC3339Nano),
+		source,
 		message.RawInput,
 		message.Kind,
 		nullableString(message.Mode),
@@ -179,6 +248,9 @@ func (s *SQLiteStore) InsertMessage(ctx context.Context, message MessageRecord) 
 	if err != nil {
 		return fmt.Errorf("insert chat message: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET updated_at = ? WHERE id = ?`, message.Timestamp.UTC().Format(time.RFC3339Nano), message.SessionID); err != nil {
+		return fmt.Errorf("update chat session %d updated_at: %w", message.SessionID, err)
+	}
 	return nil
 }
 
@@ -187,7 +259,7 @@ func (s *SQLiteStore) ListRecentMessages(ctx context.Context, limit int) ([]Pers
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, timestamp, raw_input, kind, COALESCE(mode, ''), COALESCE(payload, ''), output, success, COALESCE(error_text, '')
+		SELECT id, session_id, timestamp, COALESCE(source, 'system'), raw_input, kind, COALESCE(mode, ''), COALESCE(payload, ''), output, success, COALESCE(error_text, '')
 		FROM chat_messages
 		ORDER BY id DESC
 		LIMIT ?
@@ -202,7 +274,7 @@ func (s *SQLiteStore) ListRecentMessages(ctx context.Context, limit int) ([]Pers
 		var msg PersistedMessage
 		var ts string
 		var successInt int
-		if err := rows.Scan(&msg.ID, &msg.SessionID, &ts, &msg.RawInput, &msg.Kind, &msg.Mode, &msg.Payload, &msg.Output, &successInt, &msg.ErrorText); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.SessionID, &ts, &msg.Source, &msg.RawInput, &msg.Kind, &msg.Mode, &msg.Payload, &msg.Output, &successInt, &msg.ErrorText); err != nil {
 			return nil, fmt.Errorf("scan chat message row: %w", err)
 		}
 		parsedTS, err := time.Parse(time.RFC3339Nano, ts)
@@ -227,7 +299,7 @@ func (s *SQLiteStore) ListMessagesBySession(ctx context.Context, sessionID int64
 		limit = 50
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, session_id, timestamp, raw_input, kind, COALESCE(mode, ''), COALESCE(payload, ''), output, success, COALESCE(error_text, '')
+		SELECT id, session_id, timestamp, COALESCE(source, 'system'), raw_input, kind, COALESCE(mode, ''), COALESCE(payload, ''), output, success, COALESCE(error_text, '')
 		FROM chat_messages
 		WHERE session_id = ?
 		ORDER BY id ASC
@@ -243,7 +315,7 @@ func (s *SQLiteStore) ListMessagesBySession(ctx context.Context, sessionID int64
 		var msg PersistedMessage
 		var ts string
 		var successInt int
-		if err := rows.Scan(&msg.ID, &msg.SessionID, &ts, &msg.RawInput, &msg.Kind, &msg.Mode, &msg.Payload, &msg.Output, &successInt, &msg.ErrorText); err != nil {
+		if err := rows.Scan(&msg.ID, &msg.SessionID, &ts, &msg.Source, &msg.RawInput, &msg.Kind, &msg.Mode, &msg.Payload, &msg.Output, &successInt, &msg.ErrorText); err != nil {
 			return nil, fmt.Errorf("scan chat message row: %w", err)
 		}
 		parsedTS, err := time.Parse(time.RFC3339Nano, ts)
@@ -265,9 +337,9 @@ func (s *SQLiteStore) ListSessions(ctx context.Context, limit int) ([]PersistedS
 		limit = 20
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, started_at, ended_at
+		SELECT id, COALESCE(kind, 'manager'), COALESCE(title, ''), started_at, COALESCE(updated_at, started_at), ended_at
 		FROM chat_sessions
-		ORDER BY id DESC
+		ORDER BY updated_at DESC, id DESC
 		LIMIT ?
 	`, limit)
 	if err != nil {
@@ -279,8 +351,9 @@ func (s *SQLiteStore) ListSessions(ctx context.Context, limit int) ([]PersistedS
 	for rows.Next() {
 		var session PersistedSession
 		var startedRaw string
+		var updatedRaw string
 		var endedRaw sql.NullString
-		if err := rows.Scan(&session.ID, &startedRaw, &endedRaw); err != nil {
+		if err := rows.Scan(&session.ID, &session.Kind, &session.Title, &startedRaw, &updatedRaw, &endedRaw); err != nil {
 			return nil, fmt.Errorf("scan chat session row: %w", err)
 		}
 		startedAt, err := time.Parse(time.RFC3339Nano, startedRaw)
@@ -288,6 +361,11 @@ func (s *SQLiteStore) ListSessions(ctx context.Context, limit int) ([]PersistedS
 			return nil, fmt.Errorf("parse session started timestamp %q: %w", startedRaw, err)
 		}
 		session.StartedAt = startedAt
+		updatedAt, err := time.Parse(time.RFC3339Nano, updatedRaw)
+		if err != nil {
+			return nil, fmt.Errorf("parse session updated timestamp %q: %w", updatedRaw, err)
+		}
+		session.UpdatedAt = updatedAt
 		if endedRaw.Valid {
 			endedAt, err := time.Parse(time.RFC3339Nano, endedRaw.String)
 			if err != nil {
