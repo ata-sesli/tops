@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -531,5 +532,139 @@ func TestRenderChatTranscriptCoalescesShellOutputFragments(t *testing.T) {
 	}
 	if strings.Contains(rendered, "\n\no\n\n") || strings.Contains(rendered, "\n\nol\n\n") {
 		t.Fatalf("expected no standalone partial shell fragments, got:\n%s", rendered)
+	}
+}
+
+func TestRenderChatTranscriptShowsRawDebugStreamTokens(t *testing.T) {
+	rendered := renderChatTranscript([]chatstore.PersistedMessage{
+		{Timestamp: time.Now(), Source: "tops_stream", Kind: "thinking", Output: "We need", Success: true},
+		{Timestamp: time.Now(), Source: "tops_stream", Kind: "thinking", Output: " local evidence.", Success: true},
+		{Timestamp: time.Now(), Source: "tops_stream", Kind: "answering", Output: "{\"answer\":\"macOS\"}", Success: true},
+	})
+	if !strings.Contains(rendered, "TOPS thinking: We need local evidence.") {
+		t.Fatalf("expected coalesced thinking tokens, got:\n%s", rendered)
+	}
+	if !strings.Contains(rendered, "TOPS answering: {\"answer\":\"macOS\"}") {
+		t.Fatalf("expected answering stream tokens, got:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "TOPS is thinking...") || strings.Contains(rendered, "TOPS is responding...") {
+		t.Fatalf("expected raw stream tokens, not placeholder statuses, got:\n%s", rendered)
+	}
+}
+
+func TestChatTranscriptMouseWheelScroll(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+	}
+	modelOut, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	var chunk strings.Builder
+	for i := 0; i < 60; i++ {
+		fmt.Fprintf(&chunk, "line-%03d\n", i)
+	}
+	m.appendShellOutputFromPTY(1, chunk.String())
+	m.chatViewport.YOffset = 15
+	start := m.chatViewport.YOffset
+	modelOut, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelUp})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	if m.chatViewport.YOffset >= start {
+		t.Fatalf("expected wheel-up to scroll transcript up, start=%d now=%d", start, m.chatViewport.YOffset)
+	}
+	afterUp := m.chatViewport.YOffset
+	modelOut, _ = m.Update(tea.MouseMsg{Button: tea.MouseButtonWheelDown})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	if m.chatViewport.YOffset <= afterUp {
+		t.Fatalf("expected wheel-down to scroll transcript down, up=%d now=%d", afterUp, m.chatViewport.YOffset)
+	}
+}
+
+func TestRenderChatTranscriptWrapsLongLinesToWidth(t *testing.T) {
+	width := 30
+	rendered := renderChatTranscript([]chatstore.PersistedMessage{
+		{Timestamp: time.Now(), Source: "shell_user", Output: "averyveryveryveryveryveryverylongcommandwithoutspaces", Success: true},
+		{Timestamp: time.Now(), Source: "tops_agent", Output: "This is a deliberately long answer line that should wrap cleanly inside the transcript viewport width.", Success: true},
+		{Timestamp: time.Now(), Source: "tops_stream", Kind: "thinking", Output: "token1 token2 token3 token4 token5 token6 token7 token8 token9", Success: true},
+	}, width)
+	for _, line := range strings.Split(ansi.Strip(rendered), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if lipgloss.Width(line) > width {
+			t.Fatalf("expected wrapped transcript line width <= %d, got %d for %q", width, lipgloss.Width(line), line)
+		}
+	}
+}
+
+func TestTurnDurationExcludesApprovalWait(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	base := time.Date(2026, 4, 11, 12, 0, 0, 0, time.UTC)
+	now := base
+	session.now = func() time.Time { return now }
+
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:            1,
+		Live:          true,
+		Focus:         chatFocusTOPS,
+		StickyMode:    model.ModeAsk,
+		Draft:         "ask ",
+		TurnStartedAt: base,
+		TurnPausedFor: 20 * time.Second,
+	}
+
+	now = base.Add(50 * time.Second)
+	m.handleChatTurnDone(chatTurnDoneMsg{
+		SessionID: 1,
+		Mode:      model.ModeAsk,
+		Input:     "what is my os",
+		Output:    "You are on macOS.",
+		Err:       nil,
+	})
+
+	transcript := m.chatState[1].Transcript
+	if len(transcript) < 2 {
+		t.Fatalf("expected answer and duration records, got %+v", transcript)
+	}
+	last := transcript[len(transcript)-1]
+	if last.Source != "system" || !strings.Contains(last.Output, "Duration: 00:30") {
+		t.Fatalf("expected duration status with 30s active time, got %+v", last)
+	}
+	if !strings.Contains(last.Output, "approval wait excluded: 00:20") {
+		t.Fatalf("expected excluded approval wait in status line, got %+v", last)
 	}
 }

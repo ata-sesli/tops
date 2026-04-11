@@ -102,6 +102,9 @@ type chatSessionState struct {
 	Approval       *chatApprovalRequest
 	ShellPaused    bool
 	TitleAssigned  bool
+	TurnStartedAt  time.Time
+	TurnPausedAt   time.Time
+	TurnPausedFor  time.Duration
 }
 
 type chatReporter struct {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -62,39 +63,11 @@ func waitForShellOutputCmd(shell ShellController, sessionID int64) tea.Cmd {
 func (m *sessionModel) toggleTab() {
 	if m.activeTab == tabConfig {
 		m.activeTab = tabChats
-		m.configureInputForChat()
+		m.syncInputForActiveSurface()
 		return
 	}
 	m.activeTab = tabConfig
-	m.configureInputForManager()
-}
-
-func (m *sessionModel) debugf(format string, args ...any) {
-	if m == nil || m.runtime == nil || m.runtime.Logger == nil || !m.runtime.Logger.Enabled() {
-		return
-	}
-	m.runtime.Logger.Printf(format, args...)
-}
-
-func (m *sessionModel) logChatEnterState(state *chatSessionState) {
-	focus := "<none>"
-	approval := false
-	shellPaused := false
-	if state != nil {
-		focus = string(state.Focus)
-		approval = state.Approval != nil
-		shellPaused = state.ShellPaused
-	}
-	m.debugf(
-		"tui chat enter pressed tab=%s overlay=%t selected_chat=%d focus=%s approval=%t shell_paused=%t input=%q",
-		m.activeTab,
-		m.chatOverlayOpen,
-		m.selectedChatID,
-		focus,
-		approval,
-		shellPaused,
-		m.input.Value(),
-	)
+	m.syncInputForActiveSurface()
 }
 
 func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -133,7 +106,6 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	state := m.currentChatState()
 	switch msg.Type {
 	case tea.KeyEnter, tea.KeyCtrlJ:
-		m.logChatEnterState(state)
 		switch {
 		case state != nil && state.Focus == chatFocusApproval:
 			return m.submitApprovalResponse()
@@ -169,6 +141,32 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 	}
 	return m, cmd
+}
+
+func (m *sessionModel) handleChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.chatOverlayOpen {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.selectedChatIndex > 0 {
+				m.selectedChatIndex--
+			}
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			if m.selectedChatIndex < len(m.chatSessions) {
+				m.selectedChatIndex++
+			}
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.chatViewport.LineUp(3)
+	case tea.MouseButtonWheelDown:
+		m.chatViewport.LineDown(3)
+	}
+	return m, nil
 }
 
 func (m *sessionModel) handleChatOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -212,16 +210,13 @@ func (m *sessionModel) handleChatOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 func (m *sessionModel) submitShellDraft() (tea.Model, tea.Cmd) {
 	state := m.currentChatState()
 	if state == nil {
-		m.debugf("tui shell submit skipped: no active chat state")
 		return m, nil
 	}
 	if state.ShellPaused || state.Focus == chatFocusApproval {
-		m.debugf("tui shell submit skipped: shell paused=%t focus=%s", state.ShellPaused, state.Focus)
 		return m, nil
 	}
 	command := strings.TrimRight(m.input.Value(), "\r\n")
 	state.ShellDraft = command
-	m.debugf("tui shell submit buffer=%q", command)
 	state.ShellDraft = ""
 	m.input.SetValue("")
 	if command != "" {
@@ -231,16 +226,14 @@ func (m *sessionModel) submitShellDraft() (tea.Model, tea.Cmd) {
 		m.appendShellCommandFromSubmit(state.ID, command)
 	}
 	data := []byte(command + "\r")
-	m.debugf("tui shell submit prepared pty bytes=%q", string(data))
 	waitCmd, ok := m.ensureShellForChat(state)
 	if !ok {
-		m.debugf("tui shell submit skipped: shell could not be started")
 		return m, nil
 	}
 	if waitCmd != nil {
-		return m, writeShellThenWaitCmd(m.shell, state.ID, data, m.debugf)
+		return m, writeShellThenWaitCmd(m.shell, state.ID, data)
 	}
-	return m, writeShellCmd(m.shell, data, m.debugf)
+	return m, writeShellCmd(m.shell, data)
 }
 
 func (m *sessionModel) cycleShellHistory(direction int) {
@@ -266,39 +259,22 @@ func (m *sessionModel) cycleShellHistory(direction int) {
 	m.input.SetValue(state.ShellDraft)
 }
 
-func writeShellCmd(shell ShellController, data []byte, logf func(string, ...any)) tea.Cmd {
+func writeShellCmd(shell ShellController, data []byte) tea.Cmd {
 	return func() tea.Msg {
 		if shell == nil {
-			if logf != nil {
-				logf("tui shell pty write skipped: shell controller is nil")
-			}
 			return nil
 		}
-		if logf != nil {
-			logf("tui shell pty write called bytes=%q", string(data))
-		}
-		if err := shell.Write(data); err != nil && logf != nil {
-			logf("tui shell pty write failed: %v", err)
-		}
+		_ = shell.Write(data)
 		return nil
 	}
 }
 
-func writeShellThenWaitCmd(shell ShellController, sessionID int64, data []byte, logf func(string, ...any)) tea.Cmd {
+func writeShellThenWaitCmd(shell ShellController, sessionID int64, data []byte) tea.Cmd {
 	return func() tea.Msg {
 		if shell == nil {
-			if logf != nil {
-				logf("tui shell pty write skipped: shell controller is nil")
-			}
 			return nil
 		}
-		if logf != nil {
-			logf("tui shell pty write called bytes=%q", string(data))
-		}
 		if err := shell.Write(data); err != nil {
-			if logf != nil {
-				logf("tui shell pty write failed: %v", err)
-			}
 			return chatShellOutputMsg{SessionID: sessionID, Err: err}
 		}
 		event, ok := <-shell.Events()
@@ -311,7 +287,6 @@ func writeShellThenWaitCmd(shell ShellController, sessionID int64, data []byte, 
 
 func (m *sessionModel) ensureShellForChat(state *chatSessionState) (tea.Cmd, bool) {
 	if state == nil || state.ID <= 0 {
-		m.debugf("tui shell ensure skipped: no active chat state")
 		return nil, false
 	}
 	if m.shell != nil && m.liveChatID == state.ID {
@@ -327,16 +302,13 @@ func (m *sessionModel) ensureShellForChat(state *chatSessionState) (tea.Cmd, boo
 	}
 	controller := factory()
 	if controller == nil {
-		m.debugf("tui shell ensure failed: shell factory returned nil")
 		return nil, false
 	}
 	shellName := ""
 	if m.runtime != nil {
 		shellName = m.runtime.Config.Shell
 	}
-	m.debugf("tui shell ensure starting shell=%q chat=%d", shellName, state.ID)
 	if err := controller.Start(m.ctx, shellName, m.chatViewport.Width, m.chatViewport.Height); err != nil {
-		m.debugf("tui shell ensure failed: %v", err)
 		m.appendChatMessage(state.ID, chatstore.MessageRecord{
 			SessionID: state.ID,
 			Timestamp: m.session.now(),
@@ -380,6 +352,9 @@ func (m *sessionModel) submitChatDraft() (tea.Model, tea.Cmd) {
 	state.TopsStatus = topsStatusThinking
 	state.Waiting = true
 	state.ShellPaused = true
+	state.TurnStartedAt = time.Time{}
+	state.TurnPausedAt = time.Time{}
+	state.TurnPausedFor = 0
 	rawInput := fmt.Sprintf("%s %s", mode, input)
 	m.appendChatMessage(state.ID, chatstore.MessageRecord{
 		SessionID: state.ID,
@@ -414,6 +389,7 @@ func (m *sessionModel) submitApprovalResponse() (tea.Model, tea.Cmd) {
 	answer := strings.ToLower(strings.TrimSpace(m.input.Value()))
 	approved := answer == "y" || answer == "yes"
 	state.Approval.Response <- approved
+	m.resumeTurnTimer(state)
 	output := "Denied."
 	if approved {
 		output = "Approved."
@@ -592,6 +568,7 @@ func (m *sessionModel) handleChatProgress(msg chatProgressMsg) {
 		state.ShellPaused = false
 		return
 	}
+	m.startTurnTimer(state)
 	switch strings.TrimSpace(msg.Phase) {
 	case "tools":
 		state.TopsStatus = "running tool"
@@ -610,16 +587,13 @@ func (m *sessionModel) handleChatStream(msg chatStreamMsg) {
 	if state == nil {
 		return
 	}
-	label := "TOPS is thinking..."
-	if msg.Kind == "answering" {
-		label = "TOPS is responding..."
-	}
+	m.startTurnTimer(state)
 	m.appendChatMessage(state.ID, chatstore.MessageRecord{
 		SessionID: state.ID,
 		Timestamp: m.session.now(),
-		Source:    "system",
-		Kind:      "status",
-		Output:    label,
+		Source:    "tops_stream",
+		Kind:      strings.TrimSpace(msg.Kind),
+		Output:    msg.Text,
 		Success:   true,
 	})
 }
@@ -671,6 +645,8 @@ func (m *sessionModel) handleChatApprovalRequest(msg chatApprovalRequestMsg) {
 	if state == nil {
 		return
 	}
+	m.startTurnTimer(state)
+	m.pauseTurnTimer(state)
 	state.Approval = &msg.Request
 	state.Focus = chatFocusApproval
 	state.TopsStatus = topsStatusWaitingApproval
@@ -693,6 +669,7 @@ func (m *sessionModel) handleChatTurnDone(msg chatTurnDoneMsg) {
 	state.Focus = chatFocusTOPS
 	state.Draft = nextDraftForMode(state.StickyMode)
 	m.configureInputForChat()
+	elapsed, paused := m.finishTurnTimer(state)
 	if msg.Err != nil {
 		m.appendChatMessage(msg.SessionID, chatstore.MessageRecord{
 			SessionID: msg.SessionID,
@@ -704,6 +681,16 @@ func (m *sessionModel) handleChatTurnDone(msg chatTurnDoneMsg) {
 			Success:   false,
 			ErrorText: msg.Err.Error(),
 		})
+		if elapsed > 0 {
+			m.appendChatMessage(msg.SessionID, chatstore.MessageRecord{
+				SessionID: msg.SessionID,
+				Timestamp: m.session.now(),
+				Source:    "system",
+				Kind:      "status",
+				Output:    formatTurnDurationLine(elapsed, paused),
+				Success:   true,
+			})
+		}
 		return
 	}
 	m.appendChatMessage(msg.SessionID, chatstore.MessageRecord{
@@ -715,6 +702,16 @@ func (m *sessionModel) handleChatTurnDone(msg chatTurnDoneMsg) {
 		Output:    msg.Output,
 		Success:   true,
 	})
+	if elapsed > 0 {
+		m.appendChatMessage(msg.SessionID, chatstore.MessageRecord{
+			SessionID: msg.SessionID,
+			Timestamp: m.session.now(),
+			Source:    "system",
+			Kind:      "status",
+			Output:    formatTurnDurationLine(elapsed, paused),
+			Success:   true,
+		})
+	}
 }
 
 func (m *sessionModel) currentChatState() *chatSessionState {
@@ -850,7 +847,7 @@ func (m *sessionModel) refreshChatTranscript() {
 		m.chatViewport.SetContent("No active chat.\nPress Ctrl+O to open chats and create a new one.")
 		return
 	}
-	m.chatViewport.SetContent(renderChatTranscript(state.Transcript))
+	m.chatViewport.SetContent(renderChatTranscript(state.Transcript, m.chatViewport.Width))
 	m.chatViewport.GotoBottom()
 }
 
@@ -883,7 +880,6 @@ func (m *sessionModel) loadTranscriptForSelectedChat() error {
 func (m *sessionModel) appendChatMessage(sessionID int64, record chatstore.MessageRecord) {
 	switch record.Source {
 	case "shell_output", "shell_user":
-		m.debugf("blocked generic shell transcript append source=%q kind=%q output=%q", record.Source, record.Kind, record.Output)
 		return
 	}
 	m.appendTranscriptRecord(sessionID, record)
@@ -1030,13 +1026,12 @@ func (m *sessionModel) toggleChatFocus() {
 	m.configureInputForChat()
 }
 
-func (m sessionModel) renderChatView() string {
+func (m sessionModel) renderChatBody() string {
 	state := m.currentChatState()
 	title := "Current Chat"
 	if state != nil && strings.TrimSpace(state.Title) != "" {
 		title = state.Title
 	}
-	header := renderChatHeader(m)
 	main := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("238")).
@@ -1045,14 +1040,8 @@ func (m sessionModel) renderChatView() string {
 		Height(m.chatViewport.Height + 2).
 		Render(renderPaneTitle(title) + "\n" + m.chatViewport.View())
 
-	view := strings.Join([]string{
-		header,
-		main,
-		renderChatFooter(m),
-	}, "\n")
-
 	if !m.chatOverlayOpen {
-		return view
+		return main
 	}
 	m.refreshChatOverlay()
 	contentWidth := chatOverlayContentWidth(&m)
@@ -1073,7 +1062,7 @@ func (m sessionModel) renderChatView() string {
 		Render(content)
 	return lipgloss.Place(
 		m.width,
-		m.height,
+		m.chatViewport.Height+2,
 		lipgloss.Center,
 		lipgloss.Center,
 		overlay,
@@ -1105,35 +1094,6 @@ func renderChatFooter(m sessionModel) string {
 		BorderForeground(color).
 		Padding(0, 1).
 		Render(lipgloss.NewStyle().Bold(true).Foreground(color).Render(label) + lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("  "+promptHint) + "\n" + m.input.View())
-}
-
-func renderChatHeader(m sessionModel) string {
-	state := m.currentChatState()
-	status := topsStatusLabel(state)
-	focus := chatFocusLabel(state)
-	statusColor := lipgloss.Color("245")
-	switch status {
-	case string(topsStatusThinking), "running tool":
-		statusColor = lipgloss.Color("214")
-	case string(topsStatusWaitingApproval):
-		statusColor = lipgloss.Color("203")
-	case string(topsStatusIdle):
-		statusColor = lipgloss.Color("42")
-	}
-	meta := lipgloss.JoinHorizontal(
-		lipgloss.Top,
-		renderPill("Focus", focus, lipgloss.Color("69")),
-		" ",
-		renderPill("TOPS", status, statusColor),
-	)
-	help := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("245")).
-		Render("Shift+Tab tabs  Tab focus  Ctrl+O chats  Esc close  Ctrl+C quit")
-	return strings.Join([]string{
-		renderTabs(m.activeTab),
-		meta,
-		help,
-	}, "\n")
 }
 
 func renderPill(label string, value string, color lipgloss.Color) string {
@@ -1216,13 +1176,20 @@ func topsStatusLabel(state *chatSessionState) string {
 	return string(state.TopsStatus)
 }
 
-func renderChatTranscript(messages []chatstore.PersistedMessage) string {
+func renderChatTranscript(messages []chatstore.PersistedMessage, widths ...int) string {
+	width := 0
+	if len(widths) > 0 {
+		width = widths[0]
+	}
+	if width > 2 {
+		width -= 2
+	}
 	if len(messages) == 0 {
 		return lipgloss.NewStyle().
 			Foreground(lipgloss.Color("245")).
-			Render("No messages yet.\nPress Ctrl+O to create or select a chat.")
+			Render(wrapTextBlock("No messages yet.\nPress Ctrl+O to create or select a chat.", width))
 	}
-	messages = coalesceShellOutputMessages(messages)
+	messages = coalesceTranscriptMessages(messages)
 	var b strings.Builder
 	for _, message := range messages {
 		text := strings.TrimSpace(message.Output)
@@ -1234,38 +1201,46 @@ func renderChatTranscript(messages []chatstore.PersistedMessage) string {
 		}
 		switch message.Source {
 		case "shell_user":
-			b.WriteString(renderShellCommand(text))
+			b.WriteString(renderShellCommand(text, width))
 		case "shell_output":
-			b.WriteString(renderShellOutput(text))
+			b.WriteString(renderShellOutput(text, width))
 		case "tops_user":
 			mode := strings.TrimSpace(message.Mode)
 			if mode == "" {
 				mode = "ask"
 			}
-			b.WriteString(renderTOPSInput(mode, text))
+			b.WriteString(renderTOPSInput(mode, text, width))
 		case "tops_agent":
-			b.WriteString(renderTOPSBlock(text))
+			b.WriteString(renderTOPSBlock(text, width))
+		case "tops_stream":
+			b.WriteString(renderTOPSStream(message.Kind, text, width))
 		case "approval":
-			b.WriteString(renderNotice("Approval", text, lipgloss.Color("214")))
+			b.WriteString(renderNotice("Approval", text, lipgloss.Color("214"), width))
 		case "action":
-			b.WriteString(renderNotice("Action", text, lipgloss.Color("69")))
+			b.WriteString(renderNotice("Action", text, lipgloss.Color("69"), width))
 		default:
-			b.WriteString(renderNotice("Status", text, lipgloss.Color("245")))
+			b.WriteString(renderNotice("Status", text, lipgloss.Color("245"), width))
 		}
 	}
 	return strings.TrimSpace(b.String())
 }
 
-func coalesceShellOutputMessages(messages []chatstore.PersistedMessage) []chatstore.PersistedMessage {
+func coalesceTranscriptMessages(messages []chatstore.PersistedMessage) []chatstore.PersistedMessage {
 	coalesced := make([]chatstore.PersistedMessage, 0, len(messages))
 	for _, message := range messages {
-		if message.Source == "shell_output" && len(coalesced) > 0 && coalesced[len(coalesced)-1].Source == "shell_output" {
+		if len(coalesced) > 0 {
 			previous := &coalesced[len(coalesced)-1]
-			previous.Output = appendTerminalChunk(previous.Output, message.Output)
-			if previous.RawInput == "" {
-				previous.RawInput = message.RawInput
+			if message.Source == "shell_output" && previous.Source == "shell_output" {
+				previous.Output = appendTerminalChunk(previous.Output, message.Output)
+				if previous.RawInput == "" {
+					previous.RawInput = message.RawInput
+				}
+				continue
 			}
-			continue
+			if message.Source == "tops_stream" && previous.Source == "tops_stream" && previous.Kind == message.Kind {
+				previous.Output += message.Output
+				continue
+			}
 		}
 		coalesced = append(coalesced, message)
 	}
@@ -1285,40 +1260,48 @@ func appendTerminalChunk(existing string, chunk string) string {
 	return existing + chunk
 }
 
-func renderShellCommand(command string) string {
+func renderShellCommand(command string, width int) string {
 	command = strings.TrimRight(command, "\n")
+	command = wrapTextBlock("$ "+command, width)
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("42")).
-		Render("$ "+command) + "\n\n"
+		Render(command) + "\n\n"
 }
 
-func renderShellOutput(output string) string {
+func renderShellOutput(output string, width int) string {
 	output = strings.TrimRight(output, "\n")
 	if strings.TrimSpace(output) == "" {
 		return ""
 	}
+	output = wrapTextBlock(output, width)
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252")).
 		Render(output) + "\n\n"
 }
 
-func renderTOPSInput(mode string, input string) string {
+func renderTOPSInput(mode string, input string, width int) string {
 	mode = strings.TrimSpace(mode)
 	if mode == "" {
 		mode = "ask"
 	}
 	line := fmt.Sprintf(">>> %s %s", mode, strings.TrimSpace(input))
+	line = wrapTextBlock(line, width)
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("111")).
 		Render(line) + "\n\n"
 }
 
-func renderTOPSBlock(output string) string {
+func renderTOPSBlock(output string, width int) string {
 	output = strings.TrimSpace(output)
 	if output == "" {
 		return ""
 	}
-	body := indentBlock(output, "  ")
+	wrapWidth := 0
+	if width > 0 {
+		wrapWidth = max(10, width-4)
+	}
+	wrapped := wrapTextBlock(output, wrapWidth)
+	body := indentBlock(wrapped, "  ")
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder(), false, false, false, true).
 		BorderForeground(lipgloss.Color("63")).
@@ -1326,14 +1309,32 @@ func renderTOPSBlock(output string) string {
 		Render(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("111")).Render("TOPS:")+"\n"+body) + "\n\n"
 }
 
-func renderNotice(label string, text string, color lipgloss.Color) string {
+func renderTOPSStream(kind string, output string, width int) string {
+	output = strings.TrimSpace(output)
+	if output == "" {
+		return ""
+	}
+	label := "TOPS stream"
+	if strings.TrimSpace(kind) == "thinking" {
+		label = "TOPS thinking"
+	} else if strings.TrimSpace(kind) == "answering" {
+		label = "TOPS answering"
+	}
+	line := wrapTextBlock(label+": "+output, width)
+	return lipgloss.NewStyle().
+		Foreground(lipgloss.Color("245")).
+		Render(line) + "\n\n"
+}
+
+func renderNotice(label string, text string, color lipgloss.Color, width int) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return ""
 	}
+	line := wrapTextBlock(label+": "+text, width)
 	return lipgloss.NewStyle().
 		Foreground(color).
-		Render(label+": "+text) + "\n\n"
+		Render(line) + "\n\n"
 }
 
 func indentBlock(input string, prefix string) string {
@@ -1354,4 +1355,68 @@ func deriveChatTitle(input string) string {
 		return strings.TrimSpace(string(runes[:48])) + "..."
 	}
 	return input
+}
+
+func (m *sessionModel) startTurnTimer(state *chatSessionState) {
+	if state == nil || !state.TurnStartedAt.IsZero() {
+		return
+	}
+	state.TurnStartedAt = m.session.now()
+}
+
+func (m *sessionModel) pauseTurnTimer(state *chatSessionState) {
+	if state == nil || state.TurnStartedAt.IsZero() || !state.TurnPausedAt.IsZero() {
+		return
+	}
+	state.TurnPausedAt = m.session.now()
+}
+
+func (m *sessionModel) resumeTurnTimer(state *chatSessionState) {
+	if state == nil || state.TurnStartedAt.IsZero() || state.TurnPausedAt.IsZero() {
+		return
+	}
+	state.TurnPausedFor += m.session.now().Sub(state.TurnPausedAt)
+	state.TurnPausedAt = time.Time{}
+}
+
+func (m *sessionModel) finishTurnTimer(state *chatSessionState) (time.Duration, time.Duration) {
+	if state == nil || state.TurnStartedAt.IsZero() {
+		return 0, 0
+	}
+	end := m.session.now()
+	paused := state.TurnPausedFor
+	if !state.TurnPausedAt.IsZero() {
+		paused += end.Sub(state.TurnPausedAt)
+	}
+	elapsed := end.Sub(state.TurnStartedAt) - paused
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	state.TurnStartedAt = time.Time{}
+	state.TurnPausedAt = time.Time{}
+	state.TurnPausedFor = 0
+	return elapsed, paused
+}
+
+func formatTurnDurationLine(elapsed time.Duration, paused time.Duration) string {
+	base := "Duration: " + formatDurationMMSS(elapsed)
+	if paused > 0 {
+		return base + " (approval wait excluded: " + formatDurationMMSS(paused) + ")"
+	}
+	return base
+}
+
+func formatDurationMMSS(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	seconds := int(d.Round(time.Second) / time.Second)
+	minutes := seconds / 60
+	secs := seconds % 60
+	if minutes >= 60 {
+		hours := minutes / 60
+		minutes = minutes % 60
+		return fmt.Sprintf("%d:%02d:%02d", hours, minutes, secs)
+	}
+	return fmt.Sprintf("%02d:%02d", minutes, secs)
 }

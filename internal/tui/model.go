@@ -76,6 +76,7 @@ type sessionModel struct {
 
 	outputViewport viewport.Model
 	outputContent  string
+	configViewport viewport.Model
 	chatViewport   viewport.Model
 	chatOverlayVP  viewport.Model
 
@@ -95,6 +96,9 @@ type sessionModel struct {
 	liveChatID        int64
 	chatOverlayOpen   bool
 	chatState         map[int64]*chatSessionState
+	configMenu        configMenuState
+	configInputActive bool
+	mouseCapture      bool
 }
 
 func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, ollamaManager ollama.Manager) sessionModel {
@@ -106,6 +110,7 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 	input.Width = 80
 
 	outputVP := viewport.New(1, 1)
+	configVP := viewport.New(1, 1)
 	chatVP := viewport.New(1, 1)
 	overlayVP := viewport.New(1, 1)
 
@@ -118,6 +123,7 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 		activeTab:      tabConfig,
 		input:          input,
 		outputViewport: outputVP,
+		configViewport: configVP,
 		chatViewport:   chatVP,
 		chatOverlayVP:  overlayVP,
 		ollamaStatus:   deriveOllamaStatus(rt, nil, nil),
@@ -126,6 +132,7 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 		chatState:      map[int64]*chatSessionState{},
 	}
 	m.appendBanner()
+	m.syncInputForActiveSurface()
 	return m
 }
 
@@ -175,7 +182,7 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.runtime = &msg.Runtime
 		m.mode = uiModeManager
-		m.configureInputForManager()
+		m.syncInputForActiveSurface()
 		m.appendOutputBlock("Setup completed. Runtime reloaded.")
 		return m, checkOllamaStatusCmd(m.ctx, m.ollama, m.runtime)
 	case chatSessionsLoadedMsg:
@@ -183,10 +190,9 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.syncSelectedChat()
 		m.refreshChatOverlay()
 		if m.selectedChatID != 0 {
-			if err := m.loadTranscriptForSelectedChat(); err == nil {
-				m.configureInputForChat()
-			}
+			_ = m.loadTranscriptForSelectedChat()
 		}
+		m.syncInputForActiveSurface()
 		if m.activeTab == tabChats {
 			if waitCmd, ok := m.ensureShellForChat(m.currentChatState()); ok && waitCmd != nil {
 				return m, waitCmd
@@ -219,6 +225,7 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.UpdatedRuntime != nil {
 			m.runtime = msg.UpdatedRuntime
 		}
+		m.refreshConfigMenu()
 		if msg.Err != nil {
 			m.renderCommandResult(msg.Parsed, false, msg.Err.Error(), msg.Err.Error())
 		} else {
@@ -245,6 +252,9 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == uiModeSetup {
 			return m.handleSetupKey(msg)
 		}
+		if msg.Type == tea.KeyCtrlY {
+			return m, m.toggleMouseCaptureCmd()
+		}
 		if msg.Type == tea.KeyShiftTab {
 			m.toggleTab()
 			if m.activeTab == tabChats {
@@ -256,43 +266,139 @@ func (m sessionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.handleChatKey(msg)
 		}
 		return m.handleManagerKey(msg)
+	case tea.MouseMsg:
+		if m.mode == uiModeSetup {
+			return m, nil
+		}
+		if m.activeTab == tabChats {
+			return m.handleChatMouse(msg)
+		}
+		return m.handleConfigMouse(msg)
 	}
 	return m, nil
+}
+
+func (m *sessionModel) handleConfigMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	switch msg.Button {
+	case tea.MouseButtonWheelUp:
+		m.configViewport.LineUp(3)
+	case tea.MouseButtonWheelDown:
+		m.configViewport.LineDown(3)
+	}
+	return m, nil
+}
+
+func (m *sessionModel) toggleMouseCaptureCmd() tea.Cmd {
+	m.mouseCapture = !m.mouseCapture
+	if m.mouseCapture {
+		m.appendOutputBlock("Mouse capture enabled. Wheel scrolling is active; text selection may be limited by terminal.")
+		return tea.EnableMouseCellMotion
+	}
+	m.appendOutputBlock("Mouse capture disabled. Text selection is available in the terminal.")
+	return tea.DisableMouse
 }
 
 func (m sessionModel) View() string {
 	if m.mode == uiModeSetup {
 		return m.renderSetupView()
 	}
-	if m.activeTab == tabChats {
-		return m.renderChatView()
-	}
-	return m.renderManagerView()
+	return m.renderMainLayout()
 }
 
 func (m *sessionModel) handleManagerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.activeTab != tabConfig {
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
+	}
+
+	if m.configMenu.Edit != nil {
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			return m, tea.Quit
+		case tea.KeyEsc:
+			m.cancelConfigMenuEdit()
+			return m, nil
+		case tea.KeyEnter:
+			return m.applyConfigMenuEdit()
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(msg)
+			if m.configMenu.Edit != nil {
+				m.configMenu.Edit.Value = m.input.Value()
+			}
+			return m, cmd
+		}
+	}
+
+	if !m.configInputActive {
+		switch msg.Type {
+		case tea.KeyCtrlC:
+			return m, tea.Quit
+		case tea.KeyUp:
+			m.moveConfigMenu(-1)
+			return m, nil
+		case tea.KeyDown:
+			m.moveConfigMenu(1)
+			return m, nil
+		case tea.KeySpace:
+			return m.applyConfigMenuCurrent(true)
+		case tea.KeyRunes:
+			if len(msg.Runes) == 1 {
+				switch strings.ToLower(string(msg.Runes[0])) {
+				case " ":
+					return m.applyConfigMenuCurrent(true)
+				case "/":
+					m.configInputActive = true
+					m.configureInputForManager()
+					m.input.SetValue("/")
+					return m, nil
+				}
+			}
+		case tea.KeyEnter:
+			return m.applyConfigMenuCurrent(false)
+		case tea.KeyEsc:
+			return m, nil
+		}
+		return m, nil
+	}
+
 	switch msg.Type {
 	case tea.KeyCtrlC:
 		return m, tea.Quit
+	case tea.KeyUp:
+		return m, nil
+	case tea.KeyDown:
+		return m, nil
+	case tea.KeyRunes:
+		// In command mode, runes should edit the input as-is.
 	case tea.KeyEnter:
 		line := strings.TrimSpace(m.input.Value())
 		m.input.SetValue("")
-		if line == "" {
+		m.configInputActive = false
+		m.configureInputForManager()
+		if line == "" || line == "/" {
 			return m, nil
 		}
 		return m.processManagerLine(line)
+	case tea.KeyEsc:
+		m.configInputActive = false
+		m.input.SetValue("")
+		m.configureInputForManager()
+		return m, nil
 	default:
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
 	}
+	var cmd tea.Cmd
+	m.input, cmd = m.input.Update(msg)
+	return m, cmd
 }
 
 func (m *sessionModel) processManagerLine(line string) (tea.Model, tea.Cmd) {
 	parsed := ParseInput(line)
-	if m.runtime != nil && m.runtime.Logger != nil && m.runtime.Logger.Enabled() {
-		m.runtime.Logger.Printf("tui input kind=%s raw=%q", parsed.Kind, line)
-	}
+	defer m.refreshConfigMenu()
 
 	switch parsed.Kind {
 	case KindGuidance:
@@ -653,6 +759,7 @@ func (m *sessionModel) appendOutputBlock(block string) {
 	m.outputContent += block
 	m.outputViewport.SetContent(m.outputContent)
 	m.outputViewport.GotoBottom()
+	m.rebuildConfigViewportContent()
 }
 
 func (m *sessionModel) enterSetupMode(reason string) {
@@ -676,10 +783,58 @@ func (m *sessionModel) configureInputForSetup() {
 }
 
 func (m *sessionModel) configureInputForManager() {
-	m.input.Focus()
 	m.input.Prompt = "tops> "
-	m.input.Placeholder = guidanceMessage()
+	m.input.Placeholder = "Press / to enter command mode"
+	if !m.configInputActive {
+		m.input.Blur()
+		m.input.SetValue("")
+	}
+	if m.configInputActive {
+		m.input.Focus()
+		m.input.Prompt = "tops> "
+		m.input.Placeholder = guidanceMessage()
+	}
+	if m.configMenu.Edit != nil {
+		m.input.Focus()
+		m.configInputActive = false
+		m.input.Prompt = "value> "
+		m.input.Placeholder = "Press Enter to apply, Esc to cancel"
+		m.input.SetValue(m.configMenu.Edit.Value)
+		return
+	}
+	if m.configInputActive {
+		return
+	}
 	m.input.SetValue("")
+}
+
+func (m *sessionModel) setConfigInputActive(active bool) {
+	m.configInputActive = active
+	m.input.Prompt = "tops> "
+	if active {
+		m.input.Focus()
+		m.input.Placeholder = guidanceMessage()
+		return
+	}
+	m.input.Blur()
+	m.input.Placeholder = "Press / to enter command mode"
+	m.input.SetValue("")
+}
+
+func (m *sessionModel) syncInputForActiveSurface() {
+	switch m.mode {
+	case uiModeSetup:
+		m.configureInputForSetup()
+		return
+	case uiModeManager:
+		if m.activeTab == tabChats {
+			m.configureInputForChat()
+			return
+		}
+		m.setConfigInputActive(false)
+		m.refreshConfigMenu()
+		m.configureInputForManager()
+	}
 }
 
 func (m *sessionModel) applyLayout() {
@@ -693,7 +848,9 @@ func (m *sessionModel) applyLayout() {
 		viewHeight = 5
 	}
 	m.outputViewport.Width = max(1, m.width-2)
-	m.outputViewport.Height = max(1, viewHeight-2)
+	m.outputViewport.Height = max(1, viewHeight)
+	m.configViewport.Width = max(1, m.width-2)
+	m.configViewport.Height = max(1, viewHeight)
 	m.chatViewport.Width = max(20, m.width-2)
 	m.chatViewport.Height = max(1, viewHeight)
 	m.chatOverlayVP.Width = max(28, min(64, m.width-12))
@@ -702,29 +859,74 @@ func (m *sessionModel) applyLayout() {
 	if m.shell != nil {
 		_ = m.shell.Resize(m.chatViewport.Width, m.chatViewport.Height)
 	}
+	m.rebuildConfigViewportContent()
 }
 
-func (m sessionModel) renderManagerView() string {
-	header := []string{
-		renderTabs(m.activeTab),
-		fmt.Sprintf("Config    Runtime: %t    %s    %s", m.runtime != nil, m.renderOllamaStatusLine(), m.renderPendingLine()),
-		"Shift+Tab switches tabs  /setup configures TOPS  /models manages Ollama  /history shows records  /exit quits",
+func (m sessionModel) renderMainLayout() string {
+	header := m.renderMainHeader()
+	body := m.renderConfigBody()
+	footer := m.renderConfigFooter()
+	if m.activeTab == tabChats {
+		body = m.renderChatBody()
+		footer = renderChatFooter(m)
 	}
-	headerText := strings.Join(header, "\n")
+	return strings.Join([]string{
+		header,
+		body,
+		footer,
+	}, "\n")
+}
 
+func (m sessionModel) renderConfigBody() string {
 	mainPane := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("63")).
 		Padding(0, 1).
-		Width(m.outputViewport.Width + 2).
-		Height(m.outputViewport.Height + 2).
-		Render("Manager Output\n" + m.outputViewport.View())
+		Width(m.configViewport.Width + 2).
+		Height(m.configViewport.Height + 2).
+		Render("Config\n" + m.configViewport.View())
+	return mainPane
+}
 
-	return strings.Join([]string{
-		headerText,
-		mainPane,
-		m.input.View(),
-	}, "\n")
+func (m sessionModel) renderConfigFooter() string {
+	hint := "Press / for commands, Enter applies selected menu item"
+	if m.configInputActive || m.configMenu.Edit != nil {
+		hint = "Enter runs command / applies edit, Esc cancels"
+	}
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("63")).
+		Padding(0, 1).
+		Render(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("63")).Render("Config Input") +
+			lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Render("  "+hint) + "\n" + m.input.View())
+}
+
+func (m sessionModel) renderMainHeader() string {
+	lines := []string{renderTabs(m.activeTab)}
+	if m.activeTab == tabChats {
+		state := m.currentChatState()
+		lines = append(lines, strings.Join([]string{
+			renderPill("Focus", chatFocusLabel(state), lipgloss.Color("69")),
+			renderPill("TOPS", topsStatusLabel(state), chatStatusColor(topsStatusLabel(state))),
+			m.renderOllamaStatusLine(),
+		}, "   "))
+		lines = append(lines, fmt.Sprintf("Shift+Tab tabs  Tab focus  Ctrl+O chats  Ctrl+Y mouse:%s  Enter submit  Ctrl+C quit", onOff(m.mouseCapture)))
+		return strings.Join(lines, "\n")
+	}
+	lines = append(lines, fmt.Sprintf("Config    Runtime: %t    %s    %s", m.runtime != nil, m.renderOllamaStatusLine(), m.renderPendingLine()))
+	lines = append(lines, fmt.Sprintf("Shift+Tab tabs  ↑/↓ select  Space toggle  Enter apply  / command  Ctrl+Y mouse:%s", onOff(m.mouseCapture)))
+	return strings.Join(lines, "\n")
+}
+
+func chatStatusColor(status string) lipgloss.Color {
+	switch status {
+	case string(topsStatusThinking), "running tool":
+		return lipgloss.Color("214")
+	case string(topsStatusWaitingApproval):
+		return lipgloss.Color("203")
+	default:
+		return lipgloss.Color("42")
+	}
 }
 
 func (m sessionModel) renderPendingLine() string {
