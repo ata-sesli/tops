@@ -391,6 +391,44 @@ func (s *SQLiteStore) DeleteSession(ctx context.Context, sessionID int64) error 
 	return nil
 }
 
+func (s *SQLiteStore) DeleteMessages(ctx context.Context, sessionID int64, messageIDs []int64) error {
+	if sessionID <= 0 {
+		return fmt.Errorf("delete chat messages: session id must be > 0")
+	}
+	ids := make([]int64, 0, len(messageIDs))
+	for _, id := range messageIDs {
+		if id > 0 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+
+	placeholders := make([]string, 0, len(ids))
+	args := make([]any, 0, len(ids)+1)
+	args = append(args, sessionID)
+	for _, id := range ids {
+		placeholders = append(placeholders, "?")
+		args = append(args, id)
+	}
+
+	query := fmt.Sprintf(
+		`DELETE FROM chat_messages WHERE session_id = ? AND id IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	if _, err := s.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("delete chat messages for session %d: %w", sessionID, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE chat_sessions SET updated_at = ? WHERE id = ?`,
+		time.Now().UTC().Format(time.RFC3339Nano),
+		sessionID,
+	); err != nil {
+		return fmt.Errorf("update chat session %d updated_at: %w", sessionID, err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) CreateWorkflowRun(ctx context.Context, record workflow.WorkflowRunRecord) (int64, error) {
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO workflow_runs(chat_session_id, mode, input, status, started_at, ended_at, error_text)

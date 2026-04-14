@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -20,10 +21,13 @@ type chatSessionsLoadedMsg struct {
 }
 
 type chatCopyEntry struct {
-	Kind    string
-	Label   string
-	Preview string
-	Content string
+	Kind       string
+	Label      string
+	Preview    string
+	Content    string
+	GroupIndex int
+	MessageIDs []int64
+	RawIndexes []int
 }
 
 func refreshChatSessionsCmd(ctx context.Context, store chatstore.ChatStore) tea.Cmd {
@@ -93,6 +97,7 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyCtrlO:
 		if m.copyOverlayOpen {
 			m.copyOverlayOpen = false
+			m.copySelectedRows = map[int]struct{}{}
 		}
 		if m.chatOverlayOpen {
 			m.chatOverlayOpen = false
@@ -105,6 +110,7 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case tea.KeyEsc:
 		if m.copyOverlayOpen {
 			m.copyOverlayOpen = false
+			m.copySelectedRows = map[int]struct{}{}
 			m.configureInputForChat()
 			return m, nil
 		}
@@ -235,6 +241,7 @@ func (m *sessionModel) openCopyOverlay() {
 	}
 	m.copyEntries = buildCopyEntries(state.Transcript)
 	m.copySelectedIndex = 0
+	m.copySelectedRows = map[int]struct{}{}
 	m.copyOverlayOpen = true
 	m.chatOverlayOpen = false
 	m.refreshCopyOverlay()
@@ -261,6 +268,9 @@ func (m *sessionModel) handleCopyOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 			m.copySelectedIndex++
 			m.refreshCopyOverlay()
 		}
+	case tea.KeySpace:
+		m.toggleCopySelection(m.copySelectedIndex)
+		m.refreshCopyOverlay()
 	case tea.KeyRunes:
 		if len(msg.Runes) == 1 {
 			switch strings.ToLower(string(msg.Runes[0])) {
@@ -274,32 +284,79 @@ func (m *sessionModel) handleCopyOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd)
 					m.copySelectedIndex++
 					m.refreshCopyOverlay()
 				}
+			case " ":
+				m.toggleCopySelection(m.copySelectedIndex)
+				m.refreshCopyOverlay()
+			case "c":
+				return m.copySelectedOverlayEntries()
+			case "r":
+				return m.removeSelectedOverlayEntries()
 			}
 		}
 	case tea.KeyEnter:
-		return m.copySelectedOverlayEntry()
+		return m.goToSelectedOverlayEntry()
 	case tea.KeyEsc:
 		m.copyOverlayOpen = false
+		m.copySelectedRows = map[int]struct{}{}
 		m.configureInputForChat()
 	}
 	return m, nil
 }
 
-func (m *sessionModel) copySelectedOverlayEntry() (tea.Model, tea.Cmd) {
+func (m *sessionModel) toggleCopySelection(index int) {
+	if index < 0 || index >= len(m.copyEntries) {
+		return
+	}
+	if m.copySelectedRows == nil {
+		m.copySelectedRows = map[int]struct{}{}
+	}
+	if _, ok := m.copySelectedRows[index]; ok {
+		delete(m.copySelectedRows, index)
+		return
+	}
+	m.copySelectedRows[index] = struct{}{}
+}
+
+func (m *sessionModel) selectedOverlayIndexes() []int {
+	indexes := make([]int, 0, len(m.copySelectedRows))
+	for idx := range m.copySelectedRows {
+		if idx >= 0 && idx < len(m.copyEntries) {
+			indexes = append(indexes, idx)
+		}
+	}
+	if len(indexes) == 0 && m.copySelectedIndex >= 0 && m.copySelectedIndex < len(m.copyEntries) {
+		indexes = append(indexes, m.copySelectedIndex)
+	}
+	slices.Sort(indexes)
+	return indexes
+}
+
+func (m *sessionModel) copySelectedOverlayEntries() (tea.Model, tea.Cmd) {
 	state := m.currentChatState()
-	if state == nil || len(m.copyEntries) == 0 || m.copySelectedIndex < 0 || m.copySelectedIndex >= len(m.copyEntries) {
+	if state == nil || len(m.copyEntries) == 0 {
 		return m, nil
 	}
-	entry := m.copyEntries[m.copySelectedIndex]
+	indexes := m.selectedOverlayIndexes()
+	if len(indexes) == 0 {
+		return m, nil
+	}
+	selectedContents := make([]string, 0, len(indexes))
+	for _, idx := range indexes {
+		selectedContents = append(selectedContents, strings.TrimSpace(m.copyEntries[idx].Content))
+	}
+	entryContent := strings.TrimSpace(strings.Join(selectedContents, "\n\n"))
+	if entryContent == "" {
+		return m, nil
+	}
 	copyFn := m.copyToClipboard
 	if copyFn == nil {
 		copyFn = copyTextToClipboard
 	}
-	err := copyFn(entry.Content)
-	output := fmt.Sprintf("Copied %s to clipboard.", entry.Label)
+	err := copyFn(entryContent)
+	output := fmt.Sprintf("Copied %d message(s) to clipboard.", len(indexes))
 	success := true
 	if err != nil {
-		output = fmt.Sprintf("Copy failed for %s: %s", entry.Label, err)
+		output = fmt.Sprintf("Copy failed: %s", err)
 		success = false
 	}
 	m.appendChatMessage(state.ID, chatstore.MessageRecord{
@@ -312,7 +369,88 @@ func (m *sessionModel) copySelectedOverlayEntry() (tea.Model, tea.Cmd) {
 		ErrorText: errorString(err),
 	})
 	m.copyOverlayOpen = false
+	m.copySelectedRows = map[int]struct{}{}
 	m.configureInputForChat()
+	return m, nil
+}
+
+func (m *sessionModel) goToSelectedOverlayEntry() (tea.Model, tea.Cmd) {
+	state := m.currentChatState()
+	if state == nil || len(m.copyEntries) == 0 || m.copySelectedIndex < 0 || m.copySelectedIndex >= len(m.copyEntries) {
+		return m, nil
+	}
+	target := m.copyEntries[m.copySelectedIndex]
+	m.copyOverlayOpen = false
+	m.copySelectedRows = map[int]struct{}{}
+	m.configureInputForChat()
+	m.scrollChatToGroup(state.Transcript, target.GroupIndex)
+	return m, nil
+}
+
+func (m *sessionModel) removeSelectedOverlayEntries() (tea.Model, tea.Cmd) {
+	state := m.currentChatState()
+	if state == nil || len(m.copyEntries) == 0 {
+		return m, nil
+	}
+	indexes := m.selectedOverlayIndexes()
+	if len(indexes) == 0 {
+		return m, nil
+	}
+	rawIndexSet := map[int]struct{}{}
+	messageIDSet := map[int64]struct{}{}
+	for _, idx := range indexes {
+		entry := m.copyEntries[idx]
+		for _, rawIdx := range entry.RawIndexes {
+			rawIndexSet[rawIdx] = struct{}{}
+		}
+		for _, id := range entry.MessageIDs {
+			if id > 0 {
+				messageIDSet[id] = struct{}{}
+			}
+		}
+	}
+	rawIndexes := make([]int, 0, len(rawIndexSet))
+	for idx := range rawIndexSet {
+		rawIndexes = append(rawIndexes, idx)
+	}
+	slices.Sort(rawIndexes)
+	slices.Reverse(rawIndexes)
+	for _, idx := range rawIndexes {
+		if idx >= 0 && idx < len(state.Transcript) {
+			state.Transcript = append(state.Transcript[:idx], state.Transcript[idx+1:]...)
+		}
+	}
+	if m.session.store != nil && len(messageIDSet) > 0 {
+		messageIDs := make([]int64, 0, len(messageIDSet))
+		for id := range messageIDSet {
+			messageIDs = append(messageIDs, id)
+		}
+		slices.Sort(messageIDs)
+		if err := m.session.store.DeleteMessages(m.ctx, state.ID, messageIDs); err != nil {
+			m.appendChatMessage(state.ID, chatstore.MessageRecord{
+				SessionID: state.ID,
+				Timestamp: m.session.now(),
+				Source:    "system",
+				Kind:      "status",
+				Output:    fmt.Sprintf("Failed to remove selected messages: %s", err),
+				Success:   false,
+				ErrorText: err.Error(),
+			})
+			return m, nil
+		}
+	}
+	m.copyOverlayOpen = false
+	m.copySelectedRows = map[int]struct{}{}
+	m.refreshChatTranscript()
+	m.configureInputForChat()
+	m.appendChatMessage(state.ID, chatstore.MessageRecord{
+		SessionID: state.ID,
+		Timestamp: m.session.now(),
+		Source:    "system",
+		Kind:      "status",
+		Output:    fmt.Sprintf("Removed %d message(s).", len(indexes)),
+		Success:   true,
+	})
 	return m, nil
 }
 
@@ -947,7 +1085,7 @@ func (m *sessionModel) refreshChatOverlay() {
 		overlayTextLine("Chats", width, overlayLineOptions{Bold: true, Foreground: lipgloss.Color("252")}),
 		overlayTextLine(strings.Repeat("─", width), width, overlayLineOptions{Foreground: lipgloss.Color("238")}),
 		overlayTextLine("", width, overlayLineOptions{}),
-		overlayItemLine(0 == m.selectedChatIndex, "New Chat", "", width),
+		overlayItemLine(0 == m.selectedChatIndex, "New Chat", "", width, lipgloss.Color("245")),
 	}
 	for i, session := range m.chatSessions {
 		title := strings.TrimSpace(session.Title)
@@ -958,7 +1096,7 @@ func (m *sessionModel) refreshChatOverlay() {
 		if session.ID == m.selectedChatID {
 			meta = "current"
 		}
-		lines = append(lines, overlayItemLine(i+1 == m.selectedChatIndex, truncateOverlayTitle(title, width-12), meta, width))
+		lines = append(lines, overlayItemLine(i+1 == m.selectedChatIndex, truncateOverlayTitle(title, width-12), meta, width, lipgloss.Color("245")))
 	}
 	lines = append(
 		lines,
@@ -971,32 +1109,49 @@ func (m *sessionModel) refreshChatOverlay() {
 
 func (m *sessionModel) refreshCopyOverlay() {
 	width := max(36, m.copyOverlayVP.Width)
+	selectedLine := -1
+	currentLine := 0
 	lines := []string{
-		overlayTextLine("Copy Items", width, overlayLineOptions{Bold: true, Foreground: lipgloss.Color("252")}),
+		overlayTextLine("Messages", width, overlayLineOptions{Bold: true, Foreground: lipgloss.Color("252")}),
 		overlayTextLine(strings.Repeat("─", width), width, overlayLineOptions{Foreground: lipgloss.Color("238")}),
 	}
+	currentLine += len(lines)
 	if len(m.copyEntries) == 0 {
 		lines = append(lines,
 			overlayTextLine("", width, overlayLineOptions{}),
-			overlayTextLine("No copyable entries in this chat yet.", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
+			overlayTextLine("No messages in this chat yet.", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
 		)
+		currentLine += 2
 	} else {
 		lines = append(lines, overlayTextLine("", width, overlayLineOptions{}))
+		currentLine++
 		for i, entry := range m.copyEntries {
 			label := fmt.Sprintf("%d. %s", i+1, entry.Label)
-			lines = append(lines, overlayItemLine(i == m.copySelectedIndex, truncateOverlayTitle(label, width), "", width))
+			if _, ok := m.copySelectedRows[i]; ok {
+				label = "[x] " + label
+			} else {
+				label = "[ ] " + label
+			}
+			isSelected := i == m.copySelectedIndex
+			if isSelected {
+				selectedLine = currentLine
+			}
+			lines = append(lines, overlayItemLine(isSelected, truncateOverlayTitle(label, width), "", width, copyEntryColor(entry.Kind)))
+			currentLine++
 			if strings.TrimSpace(entry.Preview) != "" {
 				preview := "   " + truncateOverlayTitle(entry.Preview, max(8, width-3))
 				lines = append(lines, overlayTextLine(preview, width, overlayLineOptions{Foreground: lipgloss.Color("245")}))
+				currentLine++
 			}
 		}
 	}
 	lines = append(lines,
 		overlayTextLine("", width, overlayLineOptions{}),
 		overlayTextLine(strings.Repeat("─", width), width, overlayLineOptions{Foreground: lipgloss.Color("238")}),
-		overlayTextLine("Enter: Copy  Esc: Close", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
+		overlayTextLine("Enter: Go  Space: Select  c: Copy  r: Remove  Esc: Close", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
 	)
 	m.copyOverlayVP.SetContent(strings.Join(lines, "\n"))
+	m.ensureCopySelectionVisible(selectedLine)
 }
 
 type overlayLineOptions struct {
@@ -1028,7 +1183,7 @@ func overlayTextLine(text string, width int, opts overlayLineOptions) string {
 	return style.Render(text)
 }
 
-func overlayItemLine(selected bool, label string, meta string, width int) string {
+func overlayItemLine(selected bool, label string, meta string, width int, fg lipgloss.Color) string {
 	prefix := "  "
 	if selected {
 		prefix = "▶ "
@@ -1039,7 +1194,10 @@ func overlayItemLine(selected bool, label string, meta string, width int) string
 		text += strings.Repeat(" ", padding) + "(" + meta + ")"
 	}
 	text += strings.Repeat(" ", max(0, width-lipgloss.Width(text)))
-	base := overlayBaseLineStyle(width).Foreground(lipgloss.Color("245"))
+	if fg == "" {
+		fg = lipgloss.Color("245")
+	}
+	base := overlayBaseLineStyle(width).Foreground(fg)
 	if selected {
 		base = base.
 			Bold(true).
@@ -1047,6 +1205,42 @@ func overlayItemLine(selected bool, label string, meta string, width int) string
 			Background(lipgloss.Color("63"))
 	}
 	return base.Render(text)
+}
+
+func copyEntryColor(kind string) lipgloss.Color {
+	switch strings.TrimSpace(kind) {
+	case "tops_query":
+		return lipgloss.Color("111")
+	case "action":
+		return lipgloss.Color("69")
+	case "approval":
+		return lipgloss.Color("214")
+	case "tops_answer":
+		return lipgloss.Color("117")
+	case "shell_command":
+		return lipgloss.Color("42")
+	case "shell_output":
+		return lipgloss.Color("252")
+	default:
+		return lipgloss.Color("245")
+	}
+}
+
+func (m *sessionModel) ensureCopySelectionVisible(selectedLine int) {
+	if selectedLine < 0 || m.copyOverlayVP.Height <= 0 {
+		return
+	}
+	top := m.copyOverlayVP.YOffset
+	bottom := top + m.copyOverlayVP.Height - 1
+	switch {
+	case selectedLine < top:
+		m.copyOverlayVP.YOffset = selectedLine
+	case selectedLine > bottom:
+		m.copyOverlayVP.YOffset = selectedLine - m.copyOverlayVP.Height + 1
+	}
+	if m.copyOverlayVP.YOffset < 0 {
+		m.copyOverlayVP.YOffset = 0
+	}
 }
 
 func overlayBaseLineStyle(width int) lipgloss.Style {
@@ -1412,6 +1606,11 @@ func topsStatusLabel(state *chatSessionState) string {
 	return string(state.TopsStatus)
 }
 
+type transcriptGroup struct {
+	Message    chatstore.PersistedMessage
+	RawIndexes []int
+}
+
 func renderChatTranscript(messages []chatstore.PersistedMessage, widths ...int) string {
 	width := 0
 	if len(widths) > 0 {
@@ -1425,38 +1624,10 @@ func renderChatTranscript(messages []chatstore.PersistedMessage, widths ...int) 
 			Foreground(lipgloss.Color("245")).
 			Render(wrapTextBlock("No messages yet.\nPress Ctrl+O to create or select a chat.", width))
 	}
-	messages = coalesceTranscriptMessages(messages)
+	groups := coalesceTranscriptGroups(messages)
 	var b strings.Builder
-	for _, message := range messages {
-		text := strings.TrimSpace(message.Output)
-		if text == "" {
-			text = strings.TrimSpace(message.RawInput)
-		}
-		if text == "" {
-			continue
-		}
-		switch message.Source {
-		case "shell_user":
-			b.WriteString(renderShellCommand(text, width))
-		case "shell_output":
-			b.WriteString(renderShellOutput(text, width))
-		case "tops_user":
-			mode := strings.TrimSpace(message.Mode)
-			if mode == "" {
-				mode = "ask"
-			}
-			b.WriteString(renderTOPSInput(mode, text, width))
-		case "tops_agent":
-			b.WriteString(renderTOPSBlock(text, width))
-		case "tops_stream":
-			b.WriteString(renderTOPSStream(message.Kind, text, width))
-		case "approval":
-			b.WriteString(renderNotice("Approval", text, lipgloss.Color("214"), width))
-		case "action":
-			b.WriteString(renderNotice("Action", text, lipgloss.Color("69"), width))
-		default:
-			b.WriteString(renderNotice("Status", text, lipgloss.Color("245"), width))
-		}
+	for _, group := range groups {
+		b.WriteString(renderTranscriptMessage(group.Message, width))
 	}
 	return strings.TrimSpace(b.String())
 }
@@ -1465,23 +1636,20 @@ func renderChatTranscriptPlain(messages []chatstore.PersistedMessage) string {
 	if len(messages) == 0 {
 		return "No messages yet.\n"
 	}
-	messages = coalesceTranscriptMessages(messages)
+	groups := coalesceTranscriptGroups(messages)
 	var b strings.Builder
-	for _, message := range messages {
-		text := strings.TrimSpace(message.Output)
-		if text == "" {
-			text = strings.TrimSpace(message.RawInput)
-		}
+	for _, group := range groups {
+		text := strings.TrimSpace(firstNonEmpty(group.Message.Output, group.Message.RawInput))
 		if text == "" {
 			continue
 		}
-		switch message.Source {
+		switch group.Message.Source {
 		case "shell_user":
 			b.WriteString("$ " + text + "\n\n")
 		case "shell_output":
 			b.WriteString(text + "\n\n")
 		case "tops_user":
-			mode := strings.TrimSpace(message.Mode)
+			mode := strings.TrimSpace(group.Message.Mode)
 			if mode == "" {
 				mode = "ask"
 			}
@@ -1490,9 +1658,9 @@ func renderChatTranscriptPlain(messages []chatstore.PersistedMessage) string {
 			b.WriteString("TOPS:\n" + text + "\n\n")
 		case "tops_stream":
 			label := "TOPS stream"
-			if strings.TrimSpace(message.Kind) == "thinking" {
+			if strings.TrimSpace(group.Message.Kind) == "thinking" {
 				label = "TOPS thinking"
-			} else if strings.TrimSpace(message.Kind) == "answering" {
+			} else if strings.TrimSpace(group.Message.Kind) == "answering" {
 				label = "TOPS answering"
 			}
 			b.WriteString(label + ": " + text + "\n\n")
@@ -1507,116 +1675,145 @@ func renderChatTranscriptPlain(messages []chatstore.PersistedMessage) string {
 	return strings.TrimSpace(b.String()) + "\n"
 }
 
-func coalesceTranscriptMessages(messages []chatstore.PersistedMessage) []chatstore.PersistedMessage {
-	coalesced := make([]chatstore.PersistedMessage, 0, len(messages))
-	for _, message := range messages {
-		if len(coalesced) > 0 {
-			previous := &coalesced[len(coalesced)-1]
-			if message.Source == "shell_output" && previous.Source == "shell_output" {
-				previous.Output = appendTerminalChunk(previous.Output, message.Output)
-				if previous.RawInput == "" {
-					previous.RawInput = message.RawInput
+func coalesceTranscriptGroups(messages []chatstore.PersistedMessage) []transcriptGroup {
+	groups := make([]transcriptGroup, 0, len(messages))
+	for idx, message := range messages {
+		if len(groups) > 0 {
+			previous := &groups[len(groups)-1]
+			if message.Source == "shell_output" && previous.Message.Source == "shell_output" {
+				previous.Message.Output = appendTerminalChunk(previous.Message.Output, message.Output)
+				if previous.Message.RawInput == "" {
+					previous.Message.RawInput = message.RawInput
 				}
+				previous.RawIndexes = append(previous.RawIndexes, idx)
 				continue
 			}
-			if message.Source == "tops_stream" && previous.Source == "tops_stream" && previous.Kind == message.Kind {
-				previous.Output += message.Output
+			if message.Source == "tops_stream" && previous.Message.Source == "tops_stream" && previous.Message.Kind == message.Kind {
+				previous.Message.Output += message.Output
+				previous.RawIndexes = append(previous.RawIndexes, idx)
 				continue
 			}
 		}
-		coalesced = append(coalesced, message)
+		groups = append(groups, transcriptGroup{
+			Message:    message,
+			RawIndexes: []int{idx},
+		})
 	}
-	return coalesced
+	return groups
+}
+
+func coalesceTranscriptMessages(messages []chatstore.PersistedMessage) []chatstore.PersistedMessage {
+	groups := coalesceTranscriptGroups(messages)
+	out := make([]chatstore.PersistedMessage, 0, len(groups))
+	for _, group := range groups {
+		out = append(out, group.Message)
+	}
+	return out
 }
 
 func buildCopyEntries(messages []chatstore.PersistedMessage) []chatCopyEntry {
-	messages = coalesceTranscriptMessages(messages)
-	entries := make([]chatCopyEntry, 0, len(messages))
-	topsTurn := 0
-	shellCmd := 0
-	shellOut := 0
-	for i := 0; i < len(messages); i++ {
-		msg := messages[i]
+	groups := coalesceTranscriptGroups(messages)
+	entries := make([]chatCopyEntry, 0, len(groups))
+	counters := map[string]int{}
+	for idx, group := range groups {
+		msg := group.Message
 		text := strings.TrimSpace(firstNonEmpty(msg.Output, msg.RawInput))
 		if text == "" {
 			continue
 		}
-		switch msg.Source {
-		case "tops_user":
-			topsTurn++
-			mode := strings.TrimSpace(msg.Mode)
-			if mode == "" {
-				mode = "ask"
+		key := messageEntryKind(msg)
+		counters[key]++
+		ids := make([]int64, 0, len(group.RawIndexes))
+		for _, rawIdx := range group.RawIndexes {
+			if rawIdx >= 0 && rawIdx < len(messages) && messages[rawIdx].ID > 0 {
+				ids = append(ids, messages[rawIdx].ID)
 			}
-			query := fmt.Sprintf(">>> %s %s", mode, text)
-			entries = append(entries, chatCopyEntry{
-				Kind:    "tops_query",
-				Label:   fmt.Sprintf("TOPS query #%d", topsTurn),
-				Preview: text,
-				Content: query,
-			})
-			streamText := collectTopSTurnContent(messages, i+1)
-			if strings.TrimSpace(streamText) != "" {
-				entries = append(entries, chatCopyEntry{
-					Kind:    "tops_full_stream",
-					Label:   fmt.Sprintf("TOPS full stream #%d", topsTurn),
-					Preview: previewText(streamText, 72),
-					Content: streamText,
-				})
-			}
-		case "shell_user":
-			shellCmd++
-			content := "$ " + text
-			entries = append(entries, chatCopyEntry{
-				Kind:    "shell_query",
-				Label:   fmt.Sprintf("Shell command #%d", shellCmd),
-				Preview: text,
-				Content: content,
-			})
-		case "shell_output":
-			shellOut++
-			entries = append(entries, chatCopyEntry{
-				Kind:    "shell_output",
-				Label:   fmt.Sprintf("Shell output #%d", shellOut),
-				Preview: previewText(text, 72),
-				Content: text,
-			})
 		}
+		entries = append(entries, chatCopyEntry{
+			Kind:       key,
+			Label:      fmt.Sprintf("%s #%d", messageEntryLabel(msg), counters[key]),
+			Preview:    previewText(text, 72),
+			Content:    messageCopyContent(msg),
+			GroupIndex: idx,
+			MessageIDs: ids,
+			RawIndexes: append([]int(nil), group.RawIndexes...),
+		})
 	}
 	return entries
 }
 
-func collectTopSTurnContent(messages []chatstore.PersistedMessage, start int) string {
-	var parts []string
-	for i := start; i < len(messages); i++ {
-		msg := messages[i]
-		if msg.Source == "tops_user" {
-			break
-		}
-		text := strings.TrimSpace(firstNonEmpty(msg.Output, msg.RawInput))
-		if text == "" {
-			continue
-		}
-		switch msg.Source {
-		case "tops_stream":
-			label := "TOPS stream"
-			if strings.TrimSpace(msg.Kind) == "thinking" {
-				label = "TOPS thinking"
-			} else if strings.TrimSpace(msg.Kind) == "answering" {
-				label = "TOPS answering"
-			}
-			parts = append(parts, label+": "+text)
-		case "tops_agent":
-			parts = append(parts, "TOPS:\n"+text)
-		case "approval":
-			parts = append(parts, "Approval: "+text)
-		case "action":
-			parts = append(parts, "Action: "+text)
-		case "system":
-			parts = append(parts, "Status: "+text)
-		}
+func messageEntryKind(msg chatstore.PersistedMessage) string {
+	switch msg.Source {
+	case "shell_user":
+		return "shell_command"
+	case "shell_output":
+		return "shell_output"
+	case "tops_user":
+		return "tops_query"
+	case "tops_agent":
+		return "tops_answer"
+	case "tops_stream":
+		return "tops_stream"
+	case "approval":
+		return "approval"
+	case "action":
+		return "action"
+	default:
+		return "status"
 	}
-	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func messageEntryLabel(msg chatstore.PersistedMessage) string {
+	switch msg.Source {
+	case "shell_user":
+		return "Shell command"
+	case "shell_output":
+		return "Shell output"
+	case "tops_user":
+		return "TOPS query"
+	case "tops_agent":
+		return "TOPS answer"
+	case "tops_stream":
+		return "TOPS stream"
+	case "approval":
+		return "Approval"
+	case "action":
+		return "Action"
+	default:
+		return "Status"
+	}
+}
+
+func messageCopyContent(msg chatstore.PersistedMessage) string {
+	text := strings.TrimSpace(firstNonEmpty(msg.Output, msg.RawInput))
+	switch msg.Source {
+	case "shell_user":
+		return "$ " + text
+	case "shell_output":
+		return text
+	case "tops_user":
+		mode := strings.TrimSpace(msg.Mode)
+		if mode == "" {
+			mode = "ask"
+		}
+		return fmt.Sprintf(">>> %s %s", mode, text)
+	case "tops_agent":
+		return "TOPS:\n" + text
+	case "tops_stream":
+		label := "TOPS stream"
+		if strings.TrimSpace(msg.Kind) == "thinking" {
+			label = "TOPS thinking"
+		} else if strings.TrimSpace(msg.Kind) == "answering" {
+			label = "TOPS answering"
+		}
+		return label + ": " + text
+	case "approval":
+		return "Approval: " + text
+	case "action":
+		return "Action: " + text
+	default:
+		return "Status: " + text
+	}
 }
 
 func firstNonEmpty(primary string, fallback string) string {
@@ -1624,6 +1821,61 @@ func firstNonEmpty(primary string, fallback string) string {
 		return primary
 	}
 	return fallback
+}
+
+func renderTranscriptMessage(message chatstore.PersistedMessage, width int) string {
+	text := strings.TrimSpace(firstNonEmpty(message.Output, message.RawInput))
+	if text == "" {
+		return ""
+	}
+	switch message.Source {
+	case "shell_user":
+		return renderShellCommand(text, width)
+	case "shell_output":
+		return renderShellOutput(text, width)
+	case "tops_user":
+		mode := strings.TrimSpace(message.Mode)
+		if mode == "" {
+			mode = "ask"
+		}
+		return renderTOPSInput(mode, text, width)
+	case "tops_agent":
+		return renderTOPSBlock(text, width)
+	case "tops_stream":
+		return renderTOPSStream(message.Kind, text, width)
+	case "approval":
+		return renderNotice("Approval", text, lipgloss.Color("214"), width)
+	case "action":
+		return renderNotice("Action", text, lipgloss.Color("69"), width)
+	default:
+		return renderNotice("Status", text, lipgloss.Color("245"), width)
+	}
+}
+
+func (m *sessionModel) scrollChatToGroup(messages []chatstore.PersistedMessage, targetGroup int) {
+	if targetGroup < 0 {
+		return
+	}
+	groups := coalesceTranscriptGroups(messages)
+	if targetGroup >= len(groups) {
+		return
+	}
+	width := m.chatViewport.Width
+	if width > 2 {
+		width -= 2
+	}
+	lineOffset := 0
+	for idx := 0; idx < targetGroup; idx++ {
+		block := strings.TrimSpace(renderTranscriptMessage(groups[idx].Message, width))
+		if block == "" {
+			continue
+		}
+		lineOffset += strings.Count(block, "\n") + 2
+	}
+	if lineOffset < 0 {
+		lineOffset = 0
+	}
+	m.chatViewport.YOffset = lineOffset
 }
 
 func previewText(text string, limit int) string {

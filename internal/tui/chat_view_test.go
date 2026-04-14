@@ -750,7 +750,7 @@ func TestExportCurrentChatTranscriptWritesFile(t *testing.T) {
 	}
 }
 
-func TestBuildCopyEntriesIncludesTopsShellQueriesAndOutputs(t *testing.T) {
+func TestBuildCopyEntriesIncludesTranscriptMessages(t *testing.T) {
 	entries := buildCopyEntries([]chatstore.PersistedMessage{
 		{Source: "tops_user", Mode: "ask", Output: "What is my OS?"},
 		{Source: "tops_stream", Kind: "thinking", Output: "Need local evidence."},
@@ -764,26 +764,24 @@ func TestBuildCopyEntriesIncludesTopsShellQueriesAndOutputs(t *testing.T) {
 		joinedLabels = append(joinedLabels, e.Label)
 	}
 	all := strings.Join(joinedLabels, " | ")
-	for _, want := range []string{"TOPS query #1", "TOPS full stream #1", "Shell command #1", "Shell output #1"} {
+	for _, want := range []string{"TOPS query #1", "TOPS stream #1", "TOPS answer #1", "Shell command #1", "Shell output #1"} {
 		if !strings.Contains(all, want) {
 			t.Fatalf("expected copy entries to include %q, got labels: %s", want, all)
 		}
 	}
-	var fullStream string
+	var topAnswer string
 	for _, e := range entries {
-		if e.Kind == "tops_full_stream" {
-			fullStream = e.Content
+		if e.Kind == "tops_answer" {
+			topAnswer = e.Content
 			break
 		}
 	}
-	if !strings.Contains(fullStream, "TOPS thinking: Need local evidence.") ||
-		!strings.Contains(fullStream, "TOPS answering: {\"answer\":\"macOS\"}") ||
-		!strings.Contains(fullStream, "TOPS:\nYou are on macOS.") {
-		t.Fatalf("expected full stream copy to include full TOPS output, got:\n%s", fullStream)
+	if !strings.Contains(topAnswer, "TOPS:\nYou are on macOS.") {
+		t.Fatalf("expected TOPS answer entry content, got:\n%s", topAnswer)
 	}
 }
 
-func TestCopyOverlayCopiesSelectedEntity(t *testing.T) {
+func TestCopyOverlaySupportsSelectAndCopy(t *testing.T) {
 	session := NewSessionWithOptions(SessionOptions{})
 	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
 	m := &modelValue
@@ -820,7 +818,7 @@ func TestCopyOverlayCopiesSelectedEntity(t *testing.T) {
 		t.Fatal("expected copy overlay to open")
 	}
 
-	// First entry should be shell command, second shell output.
+	// First entry should be shell command, second shell output. Select second and copy with "c".
 	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	switch updated := modelOut.(type) {
 	case sessionModel:
@@ -828,7 +826,14 @@ func TestCopyOverlayCopiesSelectedEntity(t *testing.T) {
 	case *sessionModel:
 		*m = *updated
 	}
-	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	switch updated := modelOut.(type) {
 	case sessionModel:
 		*m = updated
@@ -844,6 +849,109 @@ func TestCopyOverlayCopiesSelectedEntity(t *testing.T) {
 	last := m.chatState[1].Transcript[len(m.chatState[1].Transcript)-1]
 	if !strings.Contains(last.Output, "Copied") {
 		t.Fatalf("expected copy status message, got %+v", last)
+	}
+}
+
+func TestCopyOverlayRemoveSelectedMessage(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+		Transcript: []chatstore.PersistedMessage{
+			{ID: 11, Source: "tops_user", Mode: "ask", Output: "what is my os"},
+			{ID: 12, Source: "tops_agent", Output: "You are on macOS"},
+		},
+	}
+	m.copyOverlayOpen = true
+	m.openCopyOverlay()
+	if len(m.copyEntries) < 2 {
+		t.Fatalf("expected copy overlay entries, got %+v", m.copyEntries)
+	}
+	// Select second row and remove with "r".
+	m.copySelectedIndex = 1
+	modelOut, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if len(m.chatState[1].Transcript) != 2 {
+		// 1 remaining user message + 1 status message
+		t.Fatalf("expected transcript to remove one row and append status, got %+v", m.chatState[1].Transcript)
+	}
+	if strings.Contains(m.chatState[1].Transcript[0].Output, "You are on macOS") {
+		t.Fatalf("expected selected message removed, transcript=%+v", m.chatState[1].Transcript)
+	}
+	last := m.chatState[1].Transcript[len(m.chatState[1].Transcript)-1]
+	if !strings.Contains(last.Output, "Removed 1 message(s).") {
+		t.Fatalf("expected remove status line, got %+v", last)
+	}
+}
+
+func TestCopyOverlaySelectionAutoScrolls(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	transcript := make([]chatstore.PersistedMessage, 0, 30)
+	for i := 0; i < 30; i++ {
+		transcript = append(transcript, chatstore.PersistedMessage{
+			ID:     int64(i + 1),
+			Source: "tops_user",
+			Mode:   "ask",
+			Output: fmt.Sprintf("q-%d", i+1),
+		})
+	}
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+		Transcript: transcript,
+	}
+	m.copyOverlayVP.Height = 10
+	m.openCopyOverlay()
+	m.copySelectedIndex = len(m.copyEntries) - 1
+	m.refreshCopyOverlay()
+	if m.copyOverlayVP.YOffset <= 0 {
+		t.Fatalf("expected copy overlay to scroll for low selection, yoffset=%d", m.copyOverlayVP.YOffset)
+	}
+}
+
+func TestCopyEntryColorByKind(t *testing.T) {
+	cases := map[string]lipgloss.Color{
+		"tops_query":    lipgloss.Color("111"),
+		"action":        lipgloss.Color("69"),
+		"approval":      lipgloss.Color("214"),
+		"tops_answer":   lipgloss.Color("117"),
+		"shell_command": lipgloss.Color("42"),
+		"shell_output":  lipgloss.Color("252"),
+		"status":        lipgloss.Color("245"),
+	}
+	for kind, want := range cases {
+		got := copyEntryColor(kind)
+		if got != want {
+			t.Fatalf("copyEntryColor(%q)=%q want %q", kind, got, want)
+		}
 	}
 }
 

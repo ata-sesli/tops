@@ -99,6 +99,7 @@ type sessionModel struct {
 	copyOverlayOpen   bool
 	copyEntries       []chatCopyEntry
 	copySelectedIndex int
+	copySelectedRows  map[int]struct{}
 	chatState         map[int64]*chatSessionState
 	configMenu        configMenuState
 	configInputActive bool
@@ -137,6 +138,7 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 		events:         make(chan tea.Msg, 256),
 		shellFactory:   func() ShellController { return NewPTYShellController() },
 		chatState:      map[int64]*chatSessionState{},
+		copySelectedRows: map[int]struct{}{},
 		copyToClipboard: func(text string) error {
 			return copyTextToClipboard(text)
 		},

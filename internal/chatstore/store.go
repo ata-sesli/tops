@@ -20,6 +20,7 @@ type ChatStore interface {
 	ListMessagesBySession(ctx context.Context, sessionID int64, limit int) ([]PersistedMessage, error)
 	ListSessions(ctx context.Context, limit int) ([]PersistedSession, error)
 	DeleteSession(ctx context.Context, sessionID int64) error
+	DeleteMessages(ctx context.Context, sessionID int64, messageIDs []int64) error
 	CreateWorkflowRun(ctx context.Context, record workflow.WorkflowRunRecord) (int64, error)
 	UpdateWorkflowRun(ctx context.Context, runID int64, status workflow.RunStatus, endedAt time.Time, errorText string) error
 	InsertWorkflowStep(ctx context.Context, record workflow.WorkflowStepRecord) error

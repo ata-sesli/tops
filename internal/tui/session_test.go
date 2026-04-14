@@ -65,6 +65,10 @@ func (f *fakeStore) DeleteSession(ctx context.Context, sessionID int64) error {
 	return nil
 }
 
+func (f *fakeStore) DeleteMessages(ctx context.Context, sessionID int64, messageIDs []int64) error {
+	return nil
+}
+
 func (f *fakeStore) CreateWorkflowRun(ctx context.Context, record workflow.WorkflowRunRecord) (int64, error) {
 	return 1, nil
 }
