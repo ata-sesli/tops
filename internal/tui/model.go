@@ -79,6 +79,7 @@ type sessionModel struct {
 	configViewport viewport.Model
 	chatViewport   viewport.Model
 	chatOverlayVP  viewport.Model
+	copyOverlayVP  viewport.Model
 
 	setup        SetupWizardState
 	ollamaStatus ollamaStatusState
@@ -95,10 +96,14 @@ type sessionModel struct {
 	selectedChatID    int64
 	liveChatID        int64
 	chatOverlayOpen   bool
+	copyOverlayOpen   bool
+	copyEntries       []chatCopyEntry
+	copySelectedIndex int
 	chatState         map[int64]*chatSessionState
 	configMenu        configMenuState
 	configInputActive bool
 	mouseCapture      bool
+	copyToClipboard   func(string) error
 }
 
 func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, ollamaManager ollama.Manager) sessionModel {
@@ -113,6 +118,7 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 	configVP := viewport.New(1, 1)
 	chatVP := viewport.New(1, 1)
 	overlayVP := viewport.New(1, 1)
+	copyOverlayVP := viewport.New(1, 1)
 
 	m := sessionModel{
 		ctx:            ctx,
@@ -126,10 +132,14 @@ func newSessionModel(ctx context.Context, session *Session, rt *app.Runtime, oll
 		configViewport: configVP,
 		chatViewport:   chatVP,
 		chatOverlayVP:  overlayVP,
+		copyOverlayVP:  copyOverlayVP,
 		ollamaStatus:   deriveOllamaStatus(rt, nil, nil),
 		events:         make(chan tea.Msg, 256),
 		shellFactory:   func() ShellController { return NewPTYShellController() },
 		chatState:      map[int64]*chatSessionState{},
+		copyToClipboard: func(text string) error {
+			return copyTextToClipboard(text)
+		},
 	}
 	m.appendBanner()
 	m.syncInputForActiveSurface()
@@ -855,6 +865,8 @@ func (m *sessionModel) applyLayout() {
 	m.chatViewport.Height = max(1, viewHeight)
 	m.chatOverlayVP.Width = max(28, min(64, m.width-12))
 	m.chatOverlayVP.Height = max(8, min(18, viewHeight-4))
+	m.copyOverlayVP.Width = max(36, min(76, m.width-12))
+	m.copyOverlayVP.Height = max(10, min(22, viewHeight-4))
 	m.input.Width = max(20, m.width-12)
 	if m.shell != nil {
 		_ = m.shell.Resize(m.chatViewport.Width, m.chatViewport.Height)
@@ -910,7 +922,7 @@ func (m sessionModel) renderMainHeader() string {
 			renderPill("TOPS", topsStatusLabel(state), chatStatusColor(topsStatusLabel(state))),
 			m.renderOllamaStatusLine(),
 		}, "   "))
-		lines = append(lines, fmt.Sprintf("Shift+Tab tabs  Tab focus  Ctrl+O chats  Ctrl+Y mouse:%s  Enter submit  Ctrl+C quit", onOff(m.mouseCapture)))
+		lines = append(lines, fmt.Sprintf("Shift+Tab tabs  Tab focus  ↑/↓ PgUp/PgDn Home/End scroll  Ctrl+K copy items  Ctrl+E export  Ctrl+Y mouse:%s", onOff(m.mouseCapture)))
 		return strings.Join(lines, "\n")
 	}
 	lines = append(lines, fmt.Sprintf("Config    Runtime: %t    %s    %s", m.runtime != nil, m.renderOllamaStatusLine(), m.renderPendingLine()))

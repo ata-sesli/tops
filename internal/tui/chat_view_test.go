@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -623,6 +624,226 @@ func TestRenderChatTranscriptWrapsLongLinesToWidth(t *testing.T) {
 		if lipgloss.Width(line) > width {
 			t.Fatalf("expected wrapped transcript line width <= %d, got %d for %q", width, lipgloss.Width(line), line)
 		}
+	}
+}
+
+func TestChatTranscriptKeyboardScrollKeys(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+	}
+	modelOut, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 12})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	var chunk strings.Builder
+	for i := 0; i < 120; i++ {
+		fmt.Fprintf(&chunk, "line-%03d\n", i)
+	}
+	m.appendShellOutputFromPTY(1, chunk.String())
+	m.chatViewport.YOffset = 20
+
+	before := m.chatViewport.YOffset
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if m.chatViewport.YOffset >= before {
+		t.Fatalf("expected up key to scroll transcript up, before=%d now=%d", before, m.chatViewport.YOffset)
+	}
+
+	before = m.chatViewport.YOffset
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if m.chatViewport.YOffset <= before {
+		t.Fatalf("expected page down to scroll transcript down, before=%d now=%d", before, m.chatViewport.YOffset)
+	}
+
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if m.chatViewport.YOffset != 0 {
+		t.Fatalf("expected home to go top, now=%d", m.chatViewport.YOffset)
+	}
+
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if m.chatViewport.YOffset == 0 {
+		t.Fatalf("expected end to go bottom, now=%d", m.chatViewport.YOffset)
+	}
+}
+
+func TestExportCurrentChatTranscriptWritesFile(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+		Transcript: []chatstore.PersistedMessage{
+			{Source: "tops_user", Mode: "ask", Output: "what is my os?"},
+			{Source: "tops_agent", Output: "You are on macOS."},
+		},
+	}
+	modelOut, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlE})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	transcript := m.chatState[1].Transcript
+	if len(transcript) == 0 {
+		t.Fatal("expected transcript export status message")
+	}
+	last := transcript[len(transcript)-1]
+	if !strings.HasPrefix(last.Output, "Transcript exported: ") {
+		t.Fatalf("expected export status line, got %+v", last)
+	}
+	path := strings.TrimPrefix(last.Output, "Transcript exported: ")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("expected exported file to exist, path=%q err=%v", path, err)
+	}
+	content := string(data)
+	if !strings.Contains(content, ">>> ask what is my os?") || !strings.Contains(content, "TOPS:") {
+		t.Fatalf("unexpected exported transcript content:\n%s", content)
+	}
+}
+
+func TestBuildCopyEntriesIncludesTopsShellQueriesAndOutputs(t *testing.T) {
+	entries := buildCopyEntries([]chatstore.PersistedMessage{
+		{Source: "tops_user", Mode: "ask", Output: "What is my OS?"},
+		{Source: "tops_stream", Kind: "thinking", Output: "Need local evidence."},
+		{Source: "tops_stream", Kind: "answering", Output: "{\"answer\":\"macOS\"}"},
+		{Source: "tops_agent", Output: "You are on macOS."},
+		{Source: "shell_user", Output: "ls"},
+		{Source: "shell_output", Output: "cmd\ngo.mod"},
+	})
+	joinedLabels := make([]string, 0, len(entries))
+	for _, e := range entries {
+		joinedLabels = append(joinedLabels, e.Label)
+	}
+	all := strings.Join(joinedLabels, " | ")
+	for _, want := range []string{"TOPS query #1", "TOPS full stream #1", "Shell command #1", "Shell output #1"} {
+		if !strings.Contains(all, want) {
+			t.Fatalf("expected copy entries to include %q, got labels: %s", want, all)
+		}
+	}
+	var fullStream string
+	for _, e := range entries {
+		if e.Kind == "tops_full_stream" {
+			fullStream = e.Content
+			break
+		}
+	}
+	if !strings.Contains(fullStream, "TOPS thinking: Need local evidence.") ||
+		!strings.Contains(fullStream, "TOPS answering: {\"answer\":\"macOS\"}") ||
+		!strings.Contains(fullStream, "TOPS:\nYou are on macOS.") {
+		t.Fatalf("expected full stream copy to include full TOPS output, got:\n%s", fullStream)
+	}
+}
+
+func TestCopyOverlayCopiesSelectedEntity(t *testing.T) {
+	session := NewSessionWithOptions(SessionOptions{})
+	modelValue := newSessionModel(context.Background(), session, &app.Runtime{}, nil)
+	m := &modelValue
+	m.activeTab = tabChats
+	m.selectedChatID = 1
+	m.liveChatID = 1
+	m.chatState[1] = &chatSessionState{
+		ID:         1,
+		Live:       true,
+		Focus:      chatFocusTOPS,
+		StickyMode: model.ModeAsk,
+		Draft:      "ask ",
+		Transcript: []chatstore.PersistedMessage{
+			{Source: "shell_user", Output: "pwd"},
+			{Source: "shell_output", Output: "/tmp/project"},
+		},
+	}
+	var copied string
+	m.copyToClipboard = func(text string) error {
+		copied = text
+		return nil
+	}
+
+	modelOut, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlK})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	default:
+		t.Fatalf("unexpected model type %T", modelOut)
+	}
+	if !m.copyOverlayOpen {
+		t.Fatal("expected copy overlay to open")
+	}
+
+	// First entry should be shell command, second shell output.
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	modelOut, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	switch updated := modelOut.(type) {
+	case sessionModel:
+		*m = updated
+	case *sessionModel:
+		*m = *updated
+	}
+	if strings.TrimSpace(copied) != "/tmp/project" {
+		t.Fatalf("expected copied text to be selected shell output, got %q", copied)
+	}
+	if m.copyOverlayOpen {
+		t.Fatal("expected copy overlay to close after copy")
+	}
+	last := m.chatState[1].Transcript[len(m.chatState[1].Transcript)-1]
+	if !strings.Contains(last.Output, "Copied") {
+		t.Fatalf("expected copy status message, got %+v", last)
 	}
 }
 

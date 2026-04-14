@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -16,6 +17,13 @@ import (
 type chatSessionsLoadedMsg struct {
 	Sessions []chatstore.PersistedSession
 	Err      error
+}
+
+type chatCopyEntry struct {
+	Kind    string
+	Label   string
+	Preview string
+	Content string
 }
 
 func refreshChatSessionsCmd(ctx context.Context, store chatstore.ChatStore) tea.Cmd {
@@ -77,7 +85,15 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			_ = m.shell.Close()
 		}
 		return m, tea.Quit
+	case tea.KeyCtrlK:
+		m.openCopyOverlay()
+		return m, nil
+	case tea.KeyCtrlE:
+		return m.exportCurrentChatTranscript()
 	case tea.KeyCtrlO:
+		if m.copyOverlayOpen {
+			m.copyOverlayOpen = false
+		}
 		if m.chatOverlayOpen {
 			m.chatOverlayOpen = false
 		} else {
@@ -87,6 +103,11 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.configureInputForChat()
 		return m, refreshChatSessionsCmd(m.ctx, m.session.store)
 	case tea.KeyEsc:
+		if m.copyOverlayOpen {
+			m.copyOverlayOpen = false
+			m.configureInputForChat()
+			return m, nil
+		}
 		if m.chatOverlayOpen {
 			m.chatOverlayOpen = false
 			m.configureInputForChat()
@@ -99,12 +120,28 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	if m.copyOverlayOpen {
+		return m.handleCopyOverlayKey(msg)
+	}
+
 	if m.chatOverlayOpen {
 		return m.handleChatOverlayKey(msg)
 	}
 
 	state := m.currentChatState()
 	switch msg.Type {
+	case tea.KeyPgUp:
+		m.chatViewport.LineUp(max(1, m.chatViewport.Height-2))
+		return m, nil
+	case tea.KeyPgDown:
+		m.chatViewport.LineDown(max(1, m.chatViewport.Height-2))
+		return m, nil
+	case tea.KeyHome:
+		m.chatViewport.GotoTop()
+		return m, nil
+	case tea.KeyEnd:
+		m.chatViewport.GotoBottom()
+		return m, nil
 	case tea.KeyEnter, tea.KeyCtrlJ:
 		switch {
 		case state != nil && state.Focus == chatFocusApproval:
@@ -117,15 +154,19 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case tea.KeyUp:
-		if state != nil && state.Focus == chatFocusShell {
+		if state != nil && state.Focus == chatFocusShell && strings.TrimSpace(m.input.Value()) != "" {
 			m.cycleShellHistory(-1)
 			return m, nil
 		}
+		m.chatViewport.LineUp(1)
+		return m, nil
 	case tea.KeyDown:
-		if state != nil && state.Focus == chatFocusShell {
+		if state != nil && state.Focus == chatFocusShell && strings.TrimSpace(m.input.Value()) != "" {
 			m.cycleShellHistory(1)
 			return m, nil
 		}
+		m.chatViewport.LineDown(1)
+		return m, nil
 	}
 
 	var cmd tea.Cmd
@@ -144,6 +185,24 @@ func (m *sessionModel) handleChatKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *sessionModel) handleChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if m.copyOverlayOpen {
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.copySelectedIndex > 0 {
+				m.copySelectedIndex--
+				m.refreshCopyOverlay()
+			}
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			if m.copySelectedIndex < len(m.copyEntries)-1 {
+				m.copySelectedIndex++
+				m.refreshCopyOverlay()
+			}
+			return m, nil
+		default:
+			return m, nil
+		}
+	}
 	if m.chatOverlayOpen {
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -166,6 +225,144 @@ func (m *sessionModel) handleChatMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case tea.MouseButtonWheelDown:
 		m.chatViewport.LineDown(3)
 	}
+	return m, nil
+}
+
+func (m *sessionModel) openCopyOverlay() {
+	state := m.currentChatState()
+	if state == nil {
+		return
+	}
+	m.copyEntries = buildCopyEntries(state.Transcript)
+	m.copySelectedIndex = 0
+	m.copyOverlayOpen = true
+	m.chatOverlayOpen = false
+	m.refreshCopyOverlay()
+	m.configureInputForChat()
+}
+
+func (m *sessionModel) handleCopyOverlayKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if len(m.copyEntries) == 0 {
+		switch msg.Type {
+		case tea.KeyEsc, tea.KeyEnter:
+			m.copyOverlayOpen = false
+			m.configureInputForChat()
+		}
+		return m, nil
+	}
+	switch msg.Type {
+	case tea.KeyUp:
+		if m.copySelectedIndex > 0 {
+			m.copySelectedIndex--
+			m.refreshCopyOverlay()
+		}
+	case tea.KeyDown:
+		if m.copySelectedIndex < len(m.copyEntries)-1 {
+			m.copySelectedIndex++
+			m.refreshCopyOverlay()
+		}
+	case tea.KeyRunes:
+		if len(msg.Runes) == 1 {
+			switch strings.ToLower(string(msg.Runes[0])) {
+			case "k":
+				if m.copySelectedIndex > 0 {
+					m.copySelectedIndex--
+					m.refreshCopyOverlay()
+				}
+			case "j":
+				if m.copySelectedIndex < len(m.copyEntries)-1 {
+					m.copySelectedIndex++
+					m.refreshCopyOverlay()
+				}
+			}
+		}
+	case tea.KeyEnter:
+		return m.copySelectedOverlayEntry()
+	case tea.KeyEsc:
+		m.copyOverlayOpen = false
+		m.configureInputForChat()
+	}
+	return m, nil
+}
+
+func (m *sessionModel) copySelectedOverlayEntry() (tea.Model, tea.Cmd) {
+	state := m.currentChatState()
+	if state == nil || len(m.copyEntries) == 0 || m.copySelectedIndex < 0 || m.copySelectedIndex >= len(m.copyEntries) {
+		return m, nil
+	}
+	entry := m.copyEntries[m.copySelectedIndex]
+	copyFn := m.copyToClipboard
+	if copyFn == nil {
+		copyFn = copyTextToClipboard
+	}
+	err := copyFn(entry.Content)
+	output := fmt.Sprintf("Copied %s to clipboard.", entry.Label)
+	success := true
+	if err != nil {
+		output = fmt.Sprintf("Copy failed for %s: %s", entry.Label, err)
+		success = false
+	}
+	m.appendChatMessage(state.ID, chatstore.MessageRecord{
+		SessionID: state.ID,
+		Timestamp: m.session.now(),
+		Source:    "system",
+		Kind:      "status",
+		Output:    output,
+		Success:   success,
+		ErrorText: errorString(err),
+	})
+	m.copyOverlayOpen = false
+	m.configureInputForChat()
+	return m, nil
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func (m *sessionModel) exportCurrentChatTranscript() (tea.Model, tea.Cmd) {
+	state := m.currentChatState()
+	if state == nil {
+		return m, nil
+	}
+	plain := renderChatTranscriptPlain(state.Transcript)
+	file, err := os.CreateTemp("", fmt.Sprintf("tops-chat-%d-*.txt", state.ID))
+	if err != nil {
+		m.appendChatMessage(state.ID, chatstore.MessageRecord{
+			SessionID: state.ID,
+			Timestamp: m.session.now(),
+			Source:    "system",
+			Kind:      "status",
+			Output:    fmt.Sprintf("Failed to export transcript: %s", err),
+			Success:   false,
+			ErrorText: err.Error(),
+		})
+		return m, nil
+	}
+	defer file.Close()
+	if _, err := file.WriteString(plain); err != nil {
+		m.appendChatMessage(state.ID, chatstore.MessageRecord{
+			SessionID: state.ID,
+			Timestamp: m.session.now(),
+			Source:    "system",
+			Kind:      "status",
+			Output:    fmt.Sprintf("Failed to write transcript export: %s", err),
+			Success:   false,
+			ErrorText: err.Error(),
+		})
+		return m, nil
+	}
+	m.appendChatMessage(state.ID, chatstore.MessageRecord{
+		SessionID: state.ID,
+		Timestamp: m.session.now(),
+		Source:    "system",
+		Kind:      "status",
+		Output:    fmt.Sprintf("Transcript exported: %s", file.Name()),
+		Success:   true,
+	})
 	return m, nil
 }
 
@@ -772,6 +969,36 @@ func (m *sessionModel) refreshChatOverlay() {
 	m.chatOverlayVP.SetContent(strings.Join(lines, "\n"))
 }
 
+func (m *sessionModel) refreshCopyOverlay() {
+	width := max(36, m.copyOverlayVP.Width)
+	lines := []string{
+		overlayTextLine("Copy Items", width, overlayLineOptions{Bold: true, Foreground: lipgloss.Color("252")}),
+		overlayTextLine(strings.Repeat("─", width), width, overlayLineOptions{Foreground: lipgloss.Color("238")}),
+	}
+	if len(m.copyEntries) == 0 {
+		lines = append(lines,
+			overlayTextLine("", width, overlayLineOptions{}),
+			overlayTextLine("No copyable entries in this chat yet.", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
+		)
+	} else {
+		lines = append(lines, overlayTextLine("", width, overlayLineOptions{}))
+		for i, entry := range m.copyEntries {
+			label := fmt.Sprintf("%d. %s", i+1, entry.Label)
+			lines = append(lines, overlayItemLine(i == m.copySelectedIndex, truncateOverlayTitle(label, width), "", width))
+			if strings.TrimSpace(entry.Preview) != "" {
+				preview := "   " + truncateOverlayTitle(entry.Preview, max(8, width-3))
+				lines = append(lines, overlayTextLine(preview, width, overlayLineOptions{Foreground: lipgloss.Color("245")}))
+			}
+		}
+	}
+	lines = append(lines,
+		overlayTextLine("", width, overlayLineOptions{}),
+		overlayTextLine(strings.Repeat("─", width), width, overlayLineOptions{Foreground: lipgloss.Color("238")}),
+		overlayTextLine("Enter: Copy  Esc: Close", width, overlayLineOptions{Foreground: lipgloss.Color("245")}),
+	)
+	m.copyOverlayVP.SetContent(strings.Join(lines, "\n"))
+}
+
 type overlayLineOptions struct {
 	Bold       bool
 	Foreground lipgloss.Color
@@ -990,7 +1217,7 @@ func (m *sessionModel) configureInputForChat() {
 	state := m.currentChatState()
 	m.input.Focus()
 	switch {
-	case m.chatOverlayOpen:
+	case m.chatOverlayOpen || m.copyOverlayOpen:
 		m.input.Prompt = ""
 		m.input.Placeholder = ""
 		m.input.SetValue("")
@@ -1040,18 +1267,27 @@ func (m sessionModel) renderChatBody() string {
 		Height(m.chatViewport.Height + 2).
 		Render(renderPaneTitle(title) + "\n" + m.chatViewport.View())
 
-	if !m.chatOverlayOpen {
+	if !m.copyOverlayOpen && !m.chatOverlayOpen {
 		return main
 	}
-	m.refreshChatOverlay()
 	contentWidth := chatOverlayContentWidth(&m)
 	contentHeight := max(1, m.chatOverlayVP.Height)
+	contentView := ""
+	if m.copyOverlayOpen {
+		m.refreshCopyOverlay()
+		contentWidth = max(36, m.copyOverlayVP.Width)
+		contentHeight = max(1, m.copyOverlayVP.Height)
+		contentView = m.copyOverlayVP.View()
+	} else {
+		m.refreshChatOverlay()
+		contentView = m.chatOverlayVP.View()
+	}
 	content := lipgloss.NewStyle().
 		Width(contentWidth).
 		Height(contentHeight).
 		Foreground(lipgloss.Color("245")).
 		Background(lipgloss.Color("235")).
-		Render(m.chatOverlayVP.View())
+		Render(contentView)
 	overlay := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("69")).
@@ -1126,11 +1362,11 @@ func inputHintForState(state *chatSessionState) string {
 		if state.ShellPaused {
 			return "waiting for TOPS"
 		}
-		return "$ command, Enter runs"
+		return "$ command, Enter runs, ↑/↓ Pg scroll"
 	case chatFocusApproval:
 		return "y approves, Enter denies"
 	default:
-		return "ask ... or gen ..."
+		return "ask ... or gen ..., ↑/↓ Pg scroll"
 	}
 }
 
@@ -1225,6 +1461,52 @@ func renderChatTranscript(messages []chatstore.PersistedMessage, widths ...int) 
 	return strings.TrimSpace(b.String())
 }
 
+func renderChatTranscriptPlain(messages []chatstore.PersistedMessage) string {
+	if len(messages) == 0 {
+		return "No messages yet.\n"
+	}
+	messages = coalesceTranscriptMessages(messages)
+	var b strings.Builder
+	for _, message := range messages {
+		text := strings.TrimSpace(message.Output)
+		if text == "" {
+			text = strings.TrimSpace(message.RawInput)
+		}
+		if text == "" {
+			continue
+		}
+		switch message.Source {
+		case "shell_user":
+			b.WriteString("$ " + text + "\n\n")
+		case "shell_output":
+			b.WriteString(text + "\n\n")
+		case "tops_user":
+			mode := strings.TrimSpace(message.Mode)
+			if mode == "" {
+				mode = "ask"
+			}
+			b.WriteString(fmt.Sprintf(">>> %s %s\n\n", mode, text))
+		case "tops_agent":
+			b.WriteString("TOPS:\n" + text + "\n\n")
+		case "tops_stream":
+			label := "TOPS stream"
+			if strings.TrimSpace(message.Kind) == "thinking" {
+				label = "TOPS thinking"
+			} else if strings.TrimSpace(message.Kind) == "answering" {
+				label = "TOPS answering"
+			}
+			b.WriteString(label + ": " + text + "\n\n")
+		case "approval":
+			b.WriteString("Approval: " + text + "\n\n")
+		case "action":
+			b.WriteString("Action: " + text + "\n\n")
+		default:
+			b.WriteString("Status: " + text + "\n\n")
+		}
+	}
+	return strings.TrimSpace(b.String()) + "\n"
+}
+
 func coalesceTranscriptMessages(messages []chatstore.PersistedMessage) []chatstore.PersistedMessage {
 	coalesced := make([]chatstore.PersistedMessage, 0, len(messages))
 	for _, message := range messages {
@@ -1245,6 +1527,115 @@ func coalesceTranscriptMessages(messages []chatstore.PersistedMessage) []chatsto
 		coalesced = append(coalesced, message)
 	}
 	return coalesced
+}
+
+func buildCopyEntries(messages []chatstore.PersistedMessage) []chatCopyEntry {
+	messages = coalesceTranscriptMessages(messages)
+	entries := make([]chatCopyEntry, 0, len(messages))
+	topsTurn := 0
+	shellCmd := 0
+	shellOut := 0
+	for i := 0; i < len(messages); i++ {
+		msg := messages[i]
+		text := strings.TrimSpace(firstNonEmpty(msg.Output, msg.RawInput))
+		if text == "" {
+			continue
+		}
+		switch msg.Source {
+		case "tops_user":
+			topsTurn++
+			mode := strings.TrimSpace(msg.Mode)
+			if mode == "" {
+				mode = "ask"
+			}
+			query := fmt.Sprintf(">>> %s %s", mode, text)
+			entries = append(entries, chatCopyEntry{
+				Kind:    "tops_query",
+				Label:   fmt.Sprintf("TOPS query #%d", topsTurn),
+				Preview: text,
+				Content: query,
+			})
+			streamText := collectTopSTurnContent(messages, i+1)
+			if strings.TrimSpace(streamText) != "" {
+				entries = append(entries, chatCopyEntry{
+					Kind:    "tops_full_stream",
+					Label:   fmt.Sprintf("TOPS full stream #%d", topsTurn),
+					Preview: previewText(streamText, 72),
+					Content: streamText,
+				})
+			}
+		case "shell_user":
+			shellCmd++
+			content := "$ " + text
+			entries = append(entries, chatCopyEntry{
+				Kind:    "shell_query",
+				Label:   fmt.Sprintf("Shell command #%d", shellCmd),
+				Preview: text,
+				Content: content,
+			})
+		case "shell_output":
+			shellOut++
+			entries = append(entries, chatCopyEntry{
+				Kind:    "shell_output",
+				Label:   fmt.Sprintf("Shell output #%d", shellOut),
+				Preview: previewText(text, 72),
+				Content: text,
+			})
+		}
+	}
+	return entries
+}
+
+func collectTopSTurnContent(messages []chatstore.PersistedMessage, start int) string {
+	var parts []string
+	for i := start; i < len(messages); i++ {
+		msg := messages[i]
+		if msg.Source == "tops_user" {
+			break
+		}
+		text := strings.TrimSpace(firstNonEmpty(msg.Output, msg.RawInput))
+		if text == "" {
+			continue
+		}
+		switch msg.Source {
+		case "tops_stream":
+			label := "TOPS stream"
+			if strings.TrimSpace(msg.Kind) == "thinking" {
+				label = "TOPS thinking"
+			} else if strings.TrimSpace(msg.Kind) == "answering" {
+				label = "TOPS answering"
+			}
+			parts = append(parts, label+": "+text)
+		case "tops_agent":
+			parts = append(parts, "TOPS:\n"+text)
+		case "approval":
+			parts = append(parts, "Approval: "+text)
+		case "action":
+			parts = append(parts, "Action: "+text)
+		case "system":
+			parts = append(parts, "Status: "+text)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func firstNonEmpty(primary string, fallback string) string {
+	if strings.TrimSpace(primary) != "" {
+		return primary
+	}
+	return fallback
+}
+
+func previewText(text string, limit int) string {
+	text = strings.Join(strings.Fields(strings.TrimSpace(text)), " ")
+	if limit <= 0 || len([]rune(text)) <= limit {
+		return text
+	}
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:max(1, limit-1)]) + "…"
 }
 
 func appendTerminalChunk(existing string, chunk string) string {
