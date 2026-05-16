@@ -2,9 +2,10 @@
 
 TOPS (**Terminal Operations System**) is a terminal-native assistant for:
 
-- understanding commands (`tops help`)
-- generating commands from natural language (`tops gen`)
-- answering local system questions with grounded evidence (`tops ask`)
+- understanding commands (`tps help`)
+- generating commands from natural language (`tps gen`)
+- answering local system questions with grounded evidence (`tps ask`)
+- rerunning generated commands from Command Memory (`tps run`)
 
 It is designed to be explainable and safety-conscious, not a fully autonomous shell agent.
 
@@ -27,10 +28,11 @@ TOPS is not:
 
 This README reflects the current code in this repository.
 
-- `tops` (no subcommand) launches a Bubble Tea manager TUI with `Config` and `Chats` tabs.
-- `tops help`, `tops gen`, `tops ask`, and `tops setup` are available via Cobra CLI commands.
+- `tps` (no subcommand) launches a Phoenix manager TUI with `Config` and `Chats` tabs.
+- `tps help`, `tps gen`, `tps ask`, and `tps setup` are available via Cobra CLI commands.
+- `tps run` is available as an interactive Command Memory picker.
 - Hosted providers are wired through `any-llm-go` (`openai`, `anthropic`, `gemini`).
-- Local providers (`ollama`, `local`) use Ollama’s native Go API.
+- Local provider (`yzma`) uses in-process YZMA runtime with GGUF models.
 - Chat/session and workflow audits are persisted in SQLite.
 - Test suite currently passes (`go test ./...`) and binary builds successfully.
 
@@ -38,14 +40,25 @@ This README reflects the current code in this repository.
 
 ### 1) CLI modes
 
-- `tops help "<command or snippet>"`
+- `tps help "<command or snippet>"`
   - collects local docs (`shell help`, `--help`, `man`) and summarizes them
-- `tops gen "<request>"`
+- `tps gen "<request>"`
   - turns natural language into command output with explanation and risk labels
-- `tops ask "<question>"`
+- `tps ask "<question>"`
   - answers with local evidence, and can request/execute approved workflow steps
+- `tps run`
+  - opens an interactive searchable picker over Command Memory and runs a selected item with safety checks
 
-### 2) Manager TUI (`tops`)
+### 2) Command Memory (`tps gen` + `tps run`)
+
+TOPS uses one unified command memory concept.
+
+- every successful `tps gen` artifact is auto-saved to Command Memory
+- duplicates are merged by normalized artifact + shell + project/cwd context
+- `tps run` lets you search, select, run, hide, and pin items
+- execution always re-checks policy and risk before running
+
+### 3) Manager TUI (`tps`)
 
 Top tabs:
 
@@ -55,7 +68,7 @@ Top tabs:
 Config tab supports menu-driven edits plus slash commands.  
 Chats tab supports session switching, transcript browsing, copy/export, and TOPS turns (`ask ...` / `gen ...`).
 
-### 3) Workflow + approvals
+### 4) Workflow + approvals
 
 For `ask`/`gen`, the model may return a workflow plan instead of immediate final JSON.
 
@@ -70,7 +83,7 @@ TOPS then:
 
 ## Safety model
 
-- Command execution is restricted to an internal allowlist in `internal/tools`.
+- Command execution is restricted to an internal allowlist in `internal/runtime/tools`.
 - Arguments are sanitized and time-bounded.
 - Workflow policy is explicit:
   - `execution.permissions.read_only`
@@ -89,12 +102,14 @@ Default paths:
 - Config: `~/.tops/config.json`
 - Model profiles: `~/.tops/models.json`
 - Chat/workflow DB: `~/.tops/chats.db`
+- Command Memory DB: `~/.tops/command_memory.db`
 
 Overrides:
 
 - `TOPS_CONFIG`
 - `TOPS_MODEL_PROFILES`
 - `TOPS_CHAT_DB`
+- `TOPS_COMMAND_MEMORY_DB`
 
 ## Quick start
 
@@ -102,40 +117,62 @@ Overrides:
 
 - Go `1.25.5+`
 - macOS or Linux recommended
-- Optional: Ollama for local models
+- Optional: local GGUF model + llama.cpp shared libraries for `yzma`
 
 ## Build
 
 ```bash
-go build -o ./tops ./cmd/tops
+go build -o ./tps ./cmd/tops
 ```
 
-Use `./tops` from the project directory. On macOS, `/usr/bin/tops` can exist and conflict with the command name.
+Use `./tps` from the project directory.
 
 ## Setup
 
 Interactive setup:
 
 ```bash
-./tops setup
+./tps setup
 ```
 
 Manual setup:
 
 ```bash
-./tops setup --manual \
-  --provider ollama \
+./tps setup --manual \
+  --provider yzma \
   --model qwen3.5:0.8b \
-  --endpoint http://localhost:11434
+  --model-path ~/models/qwen3.5-0.8b.gguf \
+  --lib-path /path/to/llama/libs \
+  --models-dir ~/.tops/models
 ```
+
+Local model scan path management:
+
+```bash
+./tps local paths list
+./tps local paths add ~/models
+./tps local paths remove ~/models
+./tps local models
+```
+
+Build/install TOPS-owned YZMA runtime libraries (macOS arm64 + Metal only):
+
+```bash
+./tps local build-yzma-libs --backend metal
+./tps local doctor --yzma
+./tps local status --probe --json
+```
+
+Default runtime install dir: `~/.local/share/tops/yzma/lib`
 
 ## Example usage
 
 ```bash
-./tops help "grep -r"
-./tops gen "find .log files larger than 100MB"
-./tops ask "What is my operating system?"
-./tops
+./tps help "grep -r"
+./tps gen "find .log files larger than 100MB"
+./tps ask "What is my operating system?"
+./tps run
+./tps
 ```
 
 ## Provider support
@@ -143,10 +180,7 @@ Manual setup:
 - `openai`: hosted via `any-llm-go`
 - `anthropic`: hosted via `any-llm-go`
 - `gemini`: hosted via `any-llm-go` (legacy endpoint path still exists)
-- `ollama`: local via `github.com/ollama/ollama/api`
-- `local`: alias for Ollama path
-
-For local endpoints (`localhost`, `127.0.0.1`, `::1`), TOPS attempts on-demand `ollama serve` start if unavailable.
+- `yzma`: local in-process runtime via `github.com/hybridgroup/yzma`
 
 ## TUI key controls (current)
 
@@ -176,6 +210,14 @@ TOPS messages in Chats must start with:
 
 - `ask ...` or
 - `gen ...`
+
+## `tps run` picker controls
+
+- type text or `/text`: search/filter Command Memory
+- `<number>`: run selected item
+- `d<number>`: hide selected item (soft delete)
+- `p<number>`: pin/unpin selected item
+- `q`: quit
 
 ## Screenshots
 
@@ -214,9 +256,14 @@ If clipboard is unavailable, export via `Ctrl+E` and copy from the exported file
 ```json
 {
   "provider": {
-    "type": "ollama",
+    "type": "yzma",
     "model": "qwen3.5:0.8b",
-    "endpoint": "http://localhost:11434"
+    "model_path": "/Users/you/models/qwen3.5-0.8b.gguf",
+    "lib_path": "/Users/you/llama-libs",
+    "models_dirs": [
+      "/Users/you/.tops/models",
+      "/Users/you/models"
+    ]
   },
   "shell": "zsh",
   "output": {
@@ -245,12 +292,18 @@ If clipboard is unavailable, export via `Ctrl+E` and copy from the exported file
 {
   "version": 1,
   "entries": {
-    "ollama:qwen3.5:0.8b": {
-      "provider": "ollama",
+    "yzma:qwen3.5:0.8b": {
+      "provider": "yzma",
       "model": "qwen3.5:0.8b",
       "context": 8192,
       "max_length": 512,
       "think": "off",
+      "temperature": 0.2,
+      "top_k": 40,
+      "top_p": 0.95,
+      "min_p": 0.05,
+      "repeat_penalty": 1.1,
+      "think_budget_tokens": 256,
       "system_prompt": "Prefer concise, grounded answers.",
       "ask_response": {
         "observations": true,
@@ -275,7 +328,7 @@ go test ./...
 Build:
 
 ```bash
-go build -o ./tops ./cmd/tops
+go build -o ./tps ./cmd/tops
 ```
 
 Release pipeline:
@@ -286,24 +339,19 @@ Release pipeline:
 ## Project structure
 
 - `cmd/tops`: CLI entrypoint
-- `internal/cli`: Cobra commands
-- `internal/app`: runtime wiring and mode execution
-- `internal/core`: request normalization + mode dispatch
-- `internal/help`, `internal/gen`, `internal/ask`: mode engines
-- `internal/llm`: provider adapters
-- `internal/workflow`: planner/executor/approval/audit context
-- `internal/workflow/functions`: semantic function registry
-- `internal/tui`: manager + chats Bubble Tea UI
-- `internal/chatstore`: SQLite persistence
-- `internal/modelprofile`: per-model profile storage
-- `internal/prompt`, `internal/parser`, `internal/render`: prompt/parse/render pipeline
-- `internal/policy`, `internal/tools`: risk classification + tool execution
+- `internal/intel`: ask/gen/help engines + intent/dispatch logic
+- `internal/runtime`: providers, workflow, tool execution, policy, prompting, runtime context
+- `internal/storage`: persistence (`chatstore`, `modelprofile`, `commandmemory`)
+- `internal/ui`: Phoenix TUI and rendering/utilities
+- `internal/ops`: benchmarking and runtime metrics
+- `internal/app`, `internal/cli`, `internal/config`, `internal/model`, `internal/parser`, `internal/setup`, `internal/obs`: app wiring and shared infrastructure
+- Boundary reference: `internal/BOUNDARIES.md`
 
 ## Known limitations
 
 - The project is still evolving rapidly; UX and command surface can change.
 - `help/gen/ask` are CLI commands; manager tab command input is for management flows.
-- Tool execution is intentionally constrained to an allowlist and does not run arbitrary scripts.
+- Tool execution is constrained by policy and risk checks; remembered scripts/commands require confirmation when risky/non-read-only.
 - Mouse wheel behavior in terminal TUIs always depends on terminal emulator mouse-capture rules.
 - No `LICENSE` file is currently present in the repository.
 

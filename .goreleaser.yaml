@@ -5,7 +5,7 @@ project_name: tops
 builds:
   - id: tops
     main: ./cmd/tops
-    binary: tops
+    binary: tps
     env:
       - CGO_ENABLED=0
     goos:
