@@ -86,3 +86,6 @@ dist/
 notes/
 bin/
 tops
+tps
+.cache/
+.build/
