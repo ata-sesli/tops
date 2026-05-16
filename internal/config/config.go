@@ -15,8 +15,10 @@ const (
 	ProviderOpenAI    ProviderType = "openai"
 	ProviderAnthropic ProviderType = "anthropic"
 	ProviderGemini    ProviderType = "gemini"
-	ProviderOllama    ProviderType = "ollama"
-	ProviderLocal     ProviderType = "local"
+	ProviderYZMA      ProviderType = "yzma"
+	// Deprecated provider types retained for migration on load.
+	ProviderOllama ProviderType = "ollama"
+	ProviderLocal  ProviderType = "local"
 )
 
 type Config struct {
@@ -34,6 +36,17 @@ type ProviderConfig struct {
 	APIKeyEnv  string       `json:"api_key_env,omitempty"`
 	Endpoint   string       `json:"endpoint,omitempty"`
 	LocalModel string       `json:"local_model,omitempty"`
+	ModelPath  string       `json:"model_path,omitempty"`
+	LibPath    string       `json:"lib_path,omitempty"`
+	// Deprecated migration-only input. Canonical output uses ModelsDirs.
+	ModelsDir string `json:"models_dir,omitempty"`
+	// Canonical YZMA model discovery directories.
+	ModelsDirs []string `json:"models_dirs,omitempty"`
+	// EndpointExplicit is runtime metadata set by config loader.
+	// It is true when provider.endpoint is explicitly present and non-empty in config JSON.
+	EndpointExplicit bool `json:"-"`
+	// MigrationWarnings contains non-fatal migration warnings generated during config loading.
+	MigrationWarnings []string `json:"-"`
 }
 
 type OutputConfig struct {
@@ -100,12 +113,15 @@ func Load(path string) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("read configuration: %w", err)
 	}
+	endpointExplicit := detectExplicitProviderEndpoint(contents)
 	var cfg Config
 	dec := json.NewDecoder(strings.NewReader(string(contents)))
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("parse configuration JSON: %w", err)
 	}
+	cfg.Provider.EndpointExplicit = endpointExplicit
+	cfg.applyProviderMigrations()
 	if err := cfg.ApplyDefaults(); err != nil {
 		return Config{}, err
 	}
@@ -113,6 +129,27 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func detectExplicitProviderEndpoint(contents []byte) bool {
+	var raw struct {
+		Provider map[string]json.RawMessage `json:"provider"`
+	}
+	if err := json.Unmarshal(contents, &raw); err != nil {
+		return false
+	}
+	if raw.Provider == nil {
+		return false
+	}
+	value, ok := raw.Provider["endpoint"]
+	if !ok {
+		return false
+	}
+	var endpoint string
+	if err := json.Unmarshal(value, &endpoint); err != nil {
+		return false
+	}
+	return strings.TrimSpace(endpoint) != ""
 }
 
 func SaveAtomic(path string, cfg Config) error {
@@ -129,7 +166,12 @@ func SaveAtomic(path string, cfg Config) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create config directory: %w", err)
 	}
-	data, err := json.MarshalIndent(cfg, "", "  ")
+	toSave := cfg
+	if toSave.Provider.Type == ProviderYZMA {
+		// models_dir is kept for migration-only ingestion and should not be persisted.
+		toSave.Provider.ModelsDir = ""
+	}
+	data, err := json.MarshalIndent(toSave, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal configuration: %w", err)
 	}
@@ -170,8 +212,11 @@ func (c *Config) ApplyDefaults() error {
 	if c.Inspection.TimeoutSeconds == 0 {
 		c.Inspection.TimeoutSeconds = 10
 	}
-	if (c.Provider.Type == ProviderOllama || c.Provider.Type == ProviderLocal) && strings.TrimSpace(c.Provider.Endpoint) == "" {
-		c.Provider.Endpoint = "http://localhost:11434"
+	if c.Provider.Type == ProviderYZMA {
+		c.Provider.ModelsDirs = normalizeModelScanPaths(c.Provider.ModelsDirs, c.Provider.ModelsDir)
+		if len(c.Provider.ModelsDirs) > 0 {
+			c.Provider.ModelsDir = c.Provider.ModelsDirs[0]
+		}
 	}
 	if c.Execution.Permissions.ReadOnly == "" {
 		c.Execution.Permissions.ReadOnly = ActionPermissionAllow
@@ -194,10 +239,7 @@ func (c Config) Validate() error {
 		if strings.TrimSpace(c.Provider.APIKeyEnv) == "" {
 			return fmt.Errorf("configuration invalid: provider.api_key_env is required for provider %q", c.Provider.Type)
 		}
-	case ProviderOllama, ProviderLocal:
-		if strings.TrimSpace(c.Provider.Endpoint) == "" {
-			return fmt.Errorf("configuration invalid: provider.endpoint is required for provider %q", c.Provider.Type)
-		}
+	case ProviderYZMA:
 	default:
 		return fmt.Errorf("configuration invalid: unknown provider.type %q", c.Provider.Type)
 	}
@@ -229,4 +271,132 @@ func (c Config) Validate() error {
 		return fmt.Errorf("configuration invalid: execution.trace_mode must be debug|release, got %q", c.Execution.TraceMode)
 	}
 	return nil
+}
+
+func (c *Config) applyProviderMigrations() {
+	if c == nil {
+		return
+	}
+	typ := strings.ToLower(strings.TrimSpace(string(c.Provider.Type)))
+	if typ != string(ProviderOllama) && typ != string(ProviderLocal) {
+		return
+	}
+
+	warnings := make([]string, 0, 4)
+	warnings = append(warnings, fmt.Sprintf("provider.type=%q is deprecated and was auto-migrated to %q", typ, ProviderYZMA))
+
+	modelPath := strings.TrimSpace(c.Provider.ModelPath)
+	if modelPath == "" {
+		modelPath = strings.TrimSpace(c.Provider.LocalModel)
+	}
+	if modelPath == "" {
+		warnings = append(warnings, "missing provider.model_path after migration; set provider.model_path to a local GGUF file path")
+	}
+
+	libPath := strings.TrimSpace(c.Provider.LibPath)
+	if libPath == "" {
+		libPath = strings.TrimSpace(os.Getenv("YZMA_LIB"))
+	}
+	if libPath == "" {
+		warnings = append(warnings, "missing provider.lib_path after migration; set provider.lib_path or YZMA_LIB to your llama.cpp shared libraries directory")
+	}
+
+	c.Provider.Type = ProviderYZMA
+	c.Provider.ModelPath = modelPath
+	c.Provider.LibPath = libPath
+	c.Provider.ModelsDirs = normalizeModelScanPaths(c.Provider.ModelsDirs, c.Provider.ModelsDir)
+	if len(c.Provider.ModelsDirs) > 0 {
+		c.Provider.ModelsDir = c.Provider.ModelsDirs[0]
+	}
+	c.Provider.MigrationWarnings = append(c.Provider.MigrationWarnings, warnings...)
+}
+
+func DefaultModelsDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Clean("./.tops/models")
+	}
+	return filepath.Join(home, ".tops", "models")
+}
+
+func DefaultYZMARuntimeLibDir() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return filepath.Clean("./.local/share/tops/yzma/lib")
+	}
+	return filepath.Join(home, ".local", "share", "tops", "yzma", "lib")
+}
+
+func normalizeModelScanPaths(modelsDirs []string, legacyModelsDir string) []string {
+	seed := make([]string, 0, len(modelsDirs)+1)
+	for _, dir := range modelsDirs {
+		seed = append(seed, dir)
+	}
+	if len(seed) == 0 && strings.TrimSpace(legacyModelsDir) != "" {
+		seed = append(seed, legacyModelsDir)
+	}
+
+	out := make([]string, 0, len(seed)+1)
+	seen := map[string]struct{}{}
+
+	defaultDir := canonicalizePath(DefaultModelsDir())
+	if defaultDir != "" {
+		out = append(out, defaultDir)
+		seen[pathKey(defaultDir)] = struct{}{}
+	}
+
+	for _, raw := range seed {
+		normalized := canonicalizePath(raw)
+		if normalized == "" {
+			continue
+		}
+		key := pathKey(normalized)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		out = append(out, normalized)
+		seen[key] = struct{}{}
+	}
+
+	if len(out) == 0 {
+		defaultOnly := canonicalizePath(DefaultModelsDir())
+		if defaultOnly != "" {
+			out = append(out, defaultOnly)
+		}
+	}
+	return out
+}
+
+func canonicalizePath(raw string) string {
+	path := strings.TrimSpace(raw)
+	if path == "" {
+		return ""
+	}
+	path = expandHome(path)
+	path = filepath.Clean(path)
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return path
+}
+
+func expandHome(path string) string {
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return home
+		}
+		return path
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			return filepath.Join(home, strings.TrimPrefix(path, "~/"))
+		}
+	}
+	return path
+}
+
+func pathKey(path string) string {
+	return strings.ToLower(strings.TrimSpace(path))
 }

@@ -1,0 +1,62 @@
+[
+  {
+    "id": "gen_grep_todo_ts",
+    "prompt": "gen create a grep command that finds TODO in all .ts files under src",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_find_large_files",
+    "prompt": "gen generate a command to find files larger than 100MB",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_curl_get_example",
+    "prompt": "gen create a curl command to GET https://example.com",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_tar_archive_folder",
+    "prompt": "gen generate a tar command to archive a folder",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_python_version_venv",
+    "prompt": "gen write a command that uses the version of python installed on this machine to create a virtual environment",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_largest_files_current_dir",
+    "prompt": "gen generate a command to list the largest files in my current directory",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_script_rename_jpeg",
+    "prompt": "gen write a bash script that renames all .jpeg files to .jpg",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_script_rsync_backup",
+    "prompt": "gen write a shell script that backs up a directory using rsync",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_powershell_recursive_files",
+    "prompt": "gen generate a PowerShell command to list all files recursively",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_bash_print_env",
+    "prompt": "gen create a bash command to print environment variables",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_boundary_factual",
+    "prompt": "gen what operating system am I using?",
+    "mode": "auto"
+  },
+  {
+    "id": "gen_boundary_help",
+    "prompt": "gen help git",
+    "mode": "auto"
+  }
+]

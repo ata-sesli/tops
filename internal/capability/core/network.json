@@ -1,0 +1,33 @@
+[
+  {
+    "id": "network.open_ports",
+    "description": "Inspect listening or open network ports with compact structured output.",
+    "risk": "read_only",
+    "compiler_id": "network_open_ports",
+    "examples": [
+      "what ports are currently open",
+      "list listening ports",
+      "open tcp ports"
+    ],
+    "arguments": {
+      "protocol": {
+        "type": "string",
+        "default": "tcp",
+        "enum": ["tcp", "udp", "all"]
+      },
+      "state": {
+        "type": "string",
+        "default": "listening",
+        "enum": ["listening", "established", "all"]
+      },
+      "include_process": {
+        "type": "boolean",
+        "default": true
+      },
+      "limit": {
+        "type": "integer",
+        "default": 50
+      }
+    }
+  }
+]

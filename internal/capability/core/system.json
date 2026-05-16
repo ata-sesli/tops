@@ -1,0 +1,21 @@
+[
+  {
+    "id": "system.info",
+    "description": "Inspect basic local system identity such as operating system, kernel version, architecture, hostname, and current user.",
+    "risk": "read_only",
+    "compiler_id": "system_info",
+    "examples": [
+      "what operating system am I using",
+      "what kernel version am I on",
+      "what is my hostname",
+      "who am I"
+    ],
+    "arguments": {
+      "field": {
+        "type": "string",
+        "required": true,
+        "enum": ["os", "kernel_version", "architecture", "hostname", "current_user"]
+      }
+    }
+  }
+]

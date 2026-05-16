@@ -1,0 +1,42 @@
+[
+  {
+    "id": "ask_os_simple",
+    "prompt": "ask what operating system am I using?"
+  },
+  {
+    "id": "ask_kernel_version",
+    "prompt": "ask what kernel version am I on?"
+  },
+  {
+    "id": "ask_current_directory",
+    "prompt": "ask what is my current directory?"
+  },
+  {
+    "id": "ask_directory_count",
+    "prompt": "ask how many directories are in this folder?"
+  },
+  {
+    "id": "ask_file_count_include_hidden",
+    "prompt": "ask how many files are in this folder including hidden ones?"
+  },
+  {
+    "id": "ask_current_user",
+    "prompt": "ask what is my current user?"
+  },
+  {
+    "id": "ask_hostname",
+    "prompt": "ask what is my hostname?"
+  },
+  {
+    "id": "ask_open_ports",
+    "prompt": "ask what ports are currently open?"
+  },
+  {
+    "id": "ask_disk_usage_directory",
+    "prompt": "ask what is my disk usage for this directory?"
+  },
+  {
+    "id": "ask_disk_usage_root_volume",
+    "prompt": "ask what is my root volume disk usage?"
+  }
+]

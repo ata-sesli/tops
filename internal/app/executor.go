@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"tops/internal/model"
-	"tops/internal/progress"
+	"tops/internal/ops/benchmetrics"
+	"tops/internal/runtime/progress"
+	"tops/internal/storage/commandmemory"
 )
 
 type ExecuteOptions struct {
@@ -15,6 +18,13 @@ type ExecuteOptions struct {
 }
 
 func ExecuteMode(ctx context.Context, rt Runtime, mode model.Mode, input string, opts ExecuteOptions) (output string, err error) {
+	if mode == model.ModeAsk && strings.EqualFold(strings.TrimSpace(input), "bye") {
+		if unloadErr := rt.UnloadLocalModel(ctx); unloadErr != nil {
+			return "", fmt.Errorf("provider error: failed to unload local model: %w", unloadErr)
+		}
+		return "Session closed. Local model was unloaded.", nil
+	}
+
 	reporter := progress.FromContext(ctx)
 	reporter.Start("planning")
 	defer func() {
@@ -22,11 +32,13 @@ func ExecuteMode(ctx context.Context, rt Runtime, mode model.Mode, input string,
 	}()
 	reporter.Update("planning")
 
-	result, err := rt.Router.Dispatch(ctx, mode, input, rt.Config, rt.AskResponseProfile)
+	result, err := rt.Router.Dispatch(ctx, mode, input, rt.Config, rt.AskResponseProfile, rt.IntelligenceMode, rt.PlatformContext)
 	if err != nil {
 		return "", err
 	}
 	reporter.Update("rendering")
+	renderDone := benchmetrics.StartStage(ctx, benchmetrics.StageRender)
+	defer renderDone()
 	format := rt.Config.Output.Format
 	if opts.ForceText {
 		format = "text"
@@ -43,6 +55,8 @@ func ExecuteMode(ctx context.Context, rt Runtime, mode model.Mode, input string,
 		if !ok {
 			return "", errors.New("invalid generation response type")
 		}
+		storeGeneratedCommand(ctx, rt, input, payload)
+		benchmetrics.SetOutputKind(ctx, payload.OutputKind)
 		return rt.Renderer.RenderGen(payload, format)
 	case model.ModeAsk:
 		payload, ok := result.(model.AskResult)
@@ -67,4 +81,77 @@ func ClassifyRuntimeError(err error) error {
 	default:
 		return err
 	}
+}
+
+func storeGeneratedCommand(ctx context.Context, rt Runtime, prompt string, payload model.GenResult) {
+	if !shouldStoreGeneratedCommand(payload) {
+		return
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		cwd = ""
+	}
+	projectRoot, projectFingerprint := commandmemory.DetectProjectContext(cwd)
+	store := rt.CommandMemory
+	openedStore := false
+	if store == nil {
+		path, pathErr := commandmemory.DefaultPath()
+		if pathErr != nil {
+			if rt.Logger != nil {
+				rt.Logger.Printf("command memory write skipped: default path unavailable: %v", pathErr)
+			}
+			return
+		}
+		sqliteStore, openErr := commandmemory.OpenSQLite(path, rt.Logger)
+		if openErr != nil {
+			if rt.Logger != nil {
+				rt.Logger.Printf("command memory write skipped: open failed: %v", openErr)
+			}
+			return
+		}
+		store = sqliteStore
+		openedStore = true
+	}
+	defer func() {
+		if openedStore && store != nil {
+			_ = store.Close()
+		}
+	}()
+
+	commandText := strings.TrimSpace(payload.Command)
+	scriptText := ""
+	if strings.EqualFold(strings.TrimSpace(payload.OutputKind), "shell_script") {
+		scriptText = commandText
+	}
+	if _, err := store.UpsertGenerated(ctx, commandmemory.UpsertInput{
+		Title:              strings.TrimSpace(prompt),
+		Prompt:             strings.TrimSpace(prompt),
+		CommandText:        commandText,
+		ScriptText:         scriptText,
+		OutputKind:         strings.TrimSpace(payload.OutputKind),
+		Shell:              strings.TrimSpace(rt.Config.Shell),
+		Explanation:        strings.TrimSpace(payload.Explanation),
+		Risk:               strings.Join(payload.RiskLabels, ","),
+		CWD:                strings.TrimSpace(cwd),
+		ProjectRoot:        strings.TrimSpace(projectRoot),
+		ProjectFingerprint: strings.TrimSpace(projectFingerprint),
+	}); err != nil && rt.Logger != nil {
+		rt.Logger.Printf("command memory write skipped: %v", err)
+	}
+}
+
+func shouldStoreGeneratedCommand(payload model.GenResult) bool {
+	command := strings.TrimSpace(payload.Command)
+	if command == "" {
+		return false
+	}
+	intent := strings.ToLower(strings.TrimSpace(payload.Intent.Intent))
+	switch intent {
+	case "mode-boundary-guidance", "grounded-generation-blocked":
+		return false
+	}
+	if strings.HasPrefix(strings.ToLower(command), "# workflow blocked") {
+		return false
+	}
+	return true
 }

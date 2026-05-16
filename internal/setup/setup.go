@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"tops/internal/config"
@@ -16,8 +17,10 @@ type Options struct {
 	Writer       io.Writer
 	ProviderType string
 	Model        string
+	ModelPath    string
+	LibPath      string
+	ModelsDir    string
 	APIKeyEnv    string
-	Endpoint     string
 	Shell        string
 	OutputFormat string
 	TimeoutSec   int
@@ -58,6 +61,11 @@ func Run(opts Options) error {
 	if err := config.SaveAtomic(opts.ConfigPath, cfg); err != nil {
 		return err
 	}
+	if cfg.Provider.Type == config.ProviderYZMA {
+		if err := os.MkdirAll(config.DefaultModelsDir(), 0o755); err != nil {
+			return fmt.Errorf("create default models directory: %w", err)
+		}
+	}
 	_, _ = fmt.Fprintf(opts.Writer, "Saved TOPS configuration to %s\n", opts.ConfigPath)
 	return nil
 }
@@ -67,8 +75,16 @@ func manualConfig(opts Options) config.Config {
 		Provider: config.ProviderConfig{
 			Type:      config.ProviderType(strings.ToLower(strings.TrimSpace(opts.ProviderType))),
 			Model:     strings.TrimSpace(opts.Model),
+			ModelPath: strings.TrimSpace(opts.ModelPath),
+			LibPath:   strings.TrimSpace(opts.LibPath),
+			ModelsDir: strings.TrimSpace(opts.ModelsDir),
+			ModelsDirs: func() []string {
+				if strings.TrimSpace(opts.ModelsDir) == "" {
+					return nil
+				}
+				return []string{strings.TrimSpace(opts.ModelsDir)}
+			}(),
 			APIKeyEnv: strings.TrimSpace(opts.APIKeyEnv),
-			Endpoint:  strings.TrimSpace(opts.Endpoint),
 		},
 		Shell: strings.TrimSpace(opts.Shell),
 		Output: config.OutputConfig{
@@ -85,11 +101,11 @@ func guidedConfig(opts Options) (config.Config, error) {
 	cfg := config.Config{}
 
 	provider, err := promptValue(s, opts.Writer,
-		"Provider (openai|anthropic|gemini|ollama|local)",
+		"Provider (openai|anthropic|gemini|yzma)",
 		string(config.ProviderOpenAI),
 		func(v string) error {
 			switch config.ProviderType(v) {
-			case config.ProviderOpenAI, config.ProviderAnthropic, config.ProviderGemini, config.ProviderOllama, config.ProviderLocal:
+			case config.ProviderOpenAI, config.ProviderAnthropic, config.ProviderGemini, config.ProviderYZMA:
 				return nil
 			default:
 				return fmt.Errorf("unsupported provider %q", v)
@@ -107,12 +123,23 @@ func guidedConfig(opts Options) (config.Config, error) {
 	}
 	cfg.Provider.Model = model
 
-	if cfg.Provider.Type == config.ProviderLocal || cfg.Provider.Type == config.ProviderOllama {
-		endpoint, err := promptValue(s, opts.Writer, "Ollama endpoint URL", "http://localhost:11434", nonEmpty)
+	if cfg.Provider.Type == config.ProviderYZMA {
+		modelPath, err := promptValue(s, opts.Writer, "YZMA model path (.gguf)", "", nonEmpty)
 		if err != nil {
 			return config.Config{}, err
 		}
-		cfg.Provider.Endpoint = endpoint
+		cfg.Provider.ModelPath = modelPath
+		libPath, err := promptValue(s, opts.Writer, "YZMA library path (or set YZMA_LIB)", "", nonEmpty)
+		if err != nil {
+			return config.Config{}, err
+		}
+		cfg.Provider.LibPath = libPath
+		modelsDir, err := promptValue(s, opts.Writer, "Model discovery directory", "~/.tops/models", nonEmpty)
+		if err != nil {
+			return config.Config{}, err
+		}
+		cfg.Provider.ModelsDir = modelsDir
+		cfg.Provider.ModelsDirs = []string{modelsDir}
 	} else {
 		envName, err := promptValue(s, opts.Writer, "API key environment variable", "TOPS_API_KEY", nonEmpty)
 		if err != nil {
@@ -163,8 +190,10 @@ func guidedConfig(opts Options) (config.Config, error) {
 	_, _ = fmt.Fprintf(opts.Writer, "\nReview configuration:\n")
 	_, _ = fmt.Fprintf(opts.Writer, "  Provider: %s\n", cfg.Provider.Type)
 	_, _ = fmt.Fprintf(opts.Writer, "  Model: %s\n", cfg.Provider.Model)
-	if cfg.Provider.Type == config.ProviderLocal || cfg.Provider.Type == config.ProviderOllama {
-		_, _ = fmt.Fprintf(opts.Writer, "  Endpoint: %s\n", cfg.Provider.Endpoint)
+	if cfg.Provider.Type == config.ProviderYZMA {
+		_, _ = fmt.Fprintf(opts.Writer, "  Model path: %s\n", cfg.Provider.ModelPath)
+		_, _ = fmt.Fprintf(opts.Writer, "  Lib path: %s\n", cfg.Provider.LibPath)
+		_, _ = fmt.Fprintf(opts.Writer, "  Models dir: %s\n", cfg.Provider.ModelsDir)
 	} else {
 		_, _ = fmt.Fprintf(opts.Writer, "  API key env: %s\n", cfg.Provider.APIKeyEnv)
 	}

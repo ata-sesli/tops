@@ -1,0 +1,65 @@
+[
+  {
+    "id": "filesystem.location",
+    "description": "Inspect current filesystem location such as the current directory.",
+    "risk": "read_only",
+    "compiler_id": "filesystem_location",
+    "examples": [
+      "what is my current directory",
+      "where am I",
+      "current folder"
+    ],
+    "arguments": {
+      "target": {
+        "type": "string",
+        "default": "current_directory",
+        "enum": ["current_directory", "home_directory"]
+      }
+    }
+  },
+  {
+    "id": "filesystem.count",
+    "description": "Count files or directories in a directory with hidden-file and recursion controls.",
+    "risk": "read_only",
+    "compiler_id": "filesystem_count",
+    "examples": [
+      "how many directories are in this folder",
+      "count files including hidden ones",
+      "how many files recursively"
+    ],
+    "arguments": {
+      "entity": {
+        "type": "string",
+        "required": true,
+        "enum": ["file", "directory", "both"]
+      },
+      "scope": {
+        "type": "string",
+        "default": "current_directory",
+        "enum": ["current_directory", "explicit_path", "home"]
+      },
+      "path": {
+        "type": "string",
+        "default": "."
+      },
+      "visibility": {
+        "type": "string",
+        "default": "visible_only",
+        "enum": ["visible_only", "include_hidden", "hidden_only"]
+      },
+      "recursion": {
+        "type": "string",
+        "default": "none",
+        "enum": ["none", "recursive", "max_depth"]
+      },
+      "max_depth": {
+        "type": "integer",
+        "default": 1
+      },
+      "limit": {
+        "type": "integer",
+        "default": 500
+      }
+    }
+  }
+]

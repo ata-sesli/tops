@@ -1,0 +1,52 @@
+[
+  {
+    "id": "help_git",
+    "prompt": "help git",
+    "mode": "auto"
+  },
+  {
+    "id": "help_git_commit",
+    "prompt": "help git commit",
+    "mode": "auto"
+  },
+  {
+    "id": "help_git_rebase",
+    "prompt": "help git rebase",
+    "mode": "auto"
+  },
+  {
+    "id": "help_docker_run",
+    "prompt": "help docker run",
+    "mode": "auto"
+  },
+  {
+    "id": "help_kubectl_get",
+    "prompt": "help kubectl get",
+    "mode": "auto"
+  },
+  {
+    "id": "help_tar",
+    "prompt": "help tar",
+    "mode": "auto"
+  },
+  {
+    "id": "help_grep",
+    "prompt": "help grep",
+    "mode": "auto"
+  },
+  {
+    "id": "help_python",
+    "prompt": "help python",
+    "mode": "auto"
+  },
+  {
+    "id": "help_ls",
+    "prompt": "help ls",
+    "mode": "auto"
+  },
+  {
+    "id": "help_nonexistent",
+    "prompt": "help some_nonexistent_tool",
+    "mode": "auto"
+  }
+]

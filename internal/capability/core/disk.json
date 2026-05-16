@@ -1,0 +1,33 @@
+[
+  {
+    "id": "disk.usage",
+    "description": "Inspect directory disk usage or mounted filesystem capacity.",
+    "risk": "read_only",
+    "compiler_id": "disk_usage",
+    "examples": [
+      "what is my disk usage for this directory",
+      "show disk space",
+      "mounted volumes"
+    ],
+    "arguments": {
+      "target": {
+        "type": "string",
+        "default": "current_directory",
+        "enum": ["current_directory", "explicit_path", "mounted_volumes", "root_volume"]
+      },
+      "path": {
+        "type": "string",
+        "default": "."
+      },
+      "unit": {
+        "type": "string",
+        "default": "human",
+        "enum": ["human", "bytes"]
+      },
+      "limit": {
+        "type": "integer",
+        "default": 120
+      }
+    }
+  }
+]
