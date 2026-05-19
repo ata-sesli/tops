@@ -34,6 +34,7 @@ This README reflects the current code in this repository.
 - `tps ask` uses core capability planning for common local/system questions, with LLM finalization over compact evidence.
 - Hosted providers are wired through `any-llm-go` (`openai`, `anthropic`, `gemini`).
 - Local provider (`yzma`) uses in-process YZMA runtime with GGUF models.
+- Terminal session history and TOPS chat history live together in the same Chats view.
 - Chat/session and workflow audits are persisted in SQLite.
 - The current architecture is stable enough for incremental updates rather than broad rewrites.
 - Test suite currently passes (`go test ./...`), vet passes (`go vet ./...`), and the binary builds successfully.
@@ -83,10 +84,10 @@ TOPS uses one unified command memory concept.
 Top tabs:
 
 - `Config`: model/config/policy management
-- `Chats`: embedded shell + TOPS conversation transcript
+- `Chats`: embedded shell, terminal session history, and TOPS conversation transcript
 
 Config tab supports menu-driven edits plus slash commands.  
-Chats tab supports session switching, transcript browsing, copy/export, and TOPS turns (`ask ...` / `gen ...`).
+Chats tab keeps terminal activity and TOPS turns together, with session switching, transcript browsing, copy/export, and TOPS turns (`ask ...` / `gen ...`).
 
 ### 5) Workflow + approvals
 
